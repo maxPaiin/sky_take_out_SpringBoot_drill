@@ -1,6 +1,7 @@
 package com.sky.controller.admin;
 
 import com.sky.constant.JwtClaimsConstant;
+import com.sky.dto.EmployeeDTO;
 import com.sky.dto.EmployeeLoginDTO;
 import com.sky.entity.Employee;
 import com.sky.properties.JwtProperties;
@@ -8,6 +9,8 @@ import com.sky.result.Result;
 import com.sky.service.EmployeeService;
 import com.sky.utils.JwtUtil;
 import com.sky.vo.EmployeeLoginVO;
+import io.swagger.annotations.Api;
+import io.swagger.annotations.ApiOperation;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -24,6 +27,7 @@ import java.util.Map;
 @RestController
 @RequestMapping("/admin/employee")
 @Slf4j
+@Api(tags = "員工相關的功能")
 public class EmployeeController {
 
     @Autowired
@@ -33,11 +37,11 @@ public class EmployeeController {
 
     /**
      * 登录
-     *
      * @param employeeLoginDTO
      * @return
      */
     @PostMapping("/login")
+    @ApiOperation(value = "員工登錄")
     public Result<EmployeeLoginVO> login(@RequestBody EmployeeLoginDTO employeeLoginDTO) {
         log.info("员工登录：{}", employeeLoginDTO);
 
@@ -62,11 +66,24 @@ public class EmployeeController {
     }
 
     /**
+     * 新增員工功能(json格式)
+     * @param employeeDTO 用DTO接收前端傳來的員工資料(防止前端/後端字段差異過大)
+     * @return Result對象
+     */
+    @PostMapping
+    @ApiOperation(value = "新增員工") // 功能描述
+    public Result save(@RequestBody EmployeeDTO employeeDTO) {
+        log.info("新增員工：{}", employeeDTO);
+        employeeService.save(employeeDTO);
+        return Result.success();
+    }
+
+    /**
      * 退出
-     *
      * @return
      */
     @PostMapping("/logout")
+    @ApiOperation(value = "員工登出")
     public Result<String> logout() {
         return Result.success();
     }
