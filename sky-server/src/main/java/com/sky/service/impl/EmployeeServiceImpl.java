@@ -77,7 +77,11 @@ public class EmployeeServiceImpl implements EmployeeService {
         employee.setCreateTime(LocalDateTime.now());//創建時間
         employee.setUpdateTime(LocalDateTime.now());//修改時間
 
+
         //note 紀錄當前紀錄創建人/修改人,暫時先寫死,需要動態獲取,用ThreadLocal技術,在攔截器中(interceptor)獲取當前登錄員工的id,然後放入ThreadLocal中,在這裡取出來使用
+
+        //note 用ThreadLocal技術,在攔截器中(interceptor)獲取當前登錄員工的id,然後放入ThreadLocal中,在這裡取出來使用
+
         employee.setCreateUser(BaseContext.getCurrentId());
         employee.setUpdateUser(BaseContext.getCurrentId());
 
