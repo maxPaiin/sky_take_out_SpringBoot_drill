@@ -32,7 +32,7 @@ public class Employee implements Serializable {
 
     private Integer status;
 
-    //@JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    //@JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") 時間格式化的註解,不過如果只設置一個地方,那只有一個,應該用全局的方式設置
     private LocalDateTime createTime;
 
     //@JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
