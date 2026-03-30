@@ -94,8 +94,7 @@ public class EmployeeController {
     }
 
     /**
-     * 退出
-     *
+     * 員工退出
      * @return
      */
     @PostMapping("/logout")
@@ -104,4 +103,18 @@ public class EmployeeController {
         return Result.success();
     }
 
+    /**
+     * 修改員工狀態
+     * PathVariable：從URL路徑中獲取參數
+     * @param status 狀態 1:啟用 0:禁用
+     * @param id 員工id
+     * @return 返回狀態
+     */
+    @PostMapping("/status/{status}") //當形參和從參數取值的名一致時,不需要再在註解上寫()
+    @ApiOperation(value = "修改員工狀態") // 功能描述
+    public Result startOrStop(@PathVariable Integer status , Long id){
+        log.info("啟用/禁用員工帳號:{},{}",status,id);
+        employeeService.startOrStop(status,id);
+        return Result.success();
+    }
 }

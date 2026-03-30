@@ -93,6 +93,7 @@ public class EmployeeServiceImpl implements EmployeeService {
 
     /**
      * 分頁查詢
+     *
      * @param employeePageQueryDTO
      * @return
      */
@@ -103,6 +104,22 @@ public class EmployeeServiceImpl implements EmployeeService {
         PageHelper.startPage(employeePageQueryDTO.getPage(), employeePageQueryDTO.getPageSize());
         Page<Employee> page = employeeMapper.pageQuery(employeePageQueryDTO);
         //從Page中獲取總條數和當前頁的數據列表,並裝到PageResult當中返回
-        return new PageResult(page.getTotal(),page.getResult());
+        return new PageResult(page.getTotal(), page.getResult());
+    }
+
+    /**
+     * 修改員工狀態
+     *
+     * @param status 狀態 1:啟用 0:禁用
+     * @param id     員工ID
+     */
+    @Override
+    public void startOrStop(Integer status, Long id) {
+        //本質上是修改表的狀態status字段的值
+        Employee employee = Employee.builder()
+                .status(status)
+                .id(id)
+                .build();
+        employeeMapper.update(employee);
     }
 }
