@@ -29,6 +29,8 @@ public class EmployeeServiceImpl implements EmployeeService {
 
     @Autowired
     private EmployeeMapper employeeMapper;
+    @Autowired
+    private EmployeeService employeeService;
 
     /**
      * 员工登录
@@ -109,7 +111,6 @@ public class EmployeeServiceImpl implements EmployeeService {
 
     /**
      * 修改員工狀態
-     *
      * @param status 狀態 1:啟用 0:禁用
      * @param id     員工ID
      */
@@ -120,6 +121,30 @@ public class EmployeeServiceImpl implements EmployeeService {
                 .status(status)
                 .id(id)
                 .build();
+        employeeMapper.update(employee);
+    }
+
+    /**
+     * 查詢員工
+     * @param id 員工id
+     * @return 返回一個employee對象
+     */
+    @Override
+    public Employee getById(Long id) {
+        Employee employee = employeeMapper.getById(id);
+        employee.setPassword("****");//不讓前端看到密碼
+        return employee;
+    }
+    /**
+     * 修改員工信息
+     * @param employeeDTO 用DTO接收前端傳來的員工資料
+     */
+    @Override
+    public void update(EmployeeDTO employeeDTO) {
+        Employee employee = new Employee();
+        BeanUtils.copyProperties(employeeDTO,employee);
+        employee.setUpdateTime(LocalDateTime.now());
+        employee.setUpdateUser(BaseContext.getCurrentId());
         employeeMapper.update(employee);
     }
 }

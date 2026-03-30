@@ -27,11 +27,23 @@ public interface EmployeeService {
 
     /**
      * 員工分頁查詢
-     *
      * @param employeePageQueryDTO
      * @return
      */
     PageResult pageQuery(EmployeePageQueryDTO employeePageQueryDTO);
 
     void startOrStop(Integer status, Long id);
+
+    /**
+     * 查詢員工信息
+     * @param id 員工id
+     * @return
+     */
+    Employee getById(Long id);
+
+    /**
+     * 修改員工信息
+     * @param employeeDTO 用DTO接收前端傳來的員工資料
+     */
+    void update(EmployeeDTO employeeDTO);
 }

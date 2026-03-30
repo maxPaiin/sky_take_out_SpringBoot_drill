@@ -17,6 +17,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -36,7 +37,6 @@ public class EmployeeController {
 
     /**
      * 登录
-     *
      * @param employeeLoginDTO
      * @return
      */
@@ -67,7 +67,6 @@ public class EmployeeController {
 
     /**
      * 新增員工功能(json格式)
-     *
      * @param employeeDTO 用DTO接收前端傳來的員工資料(防止前端/後端字段差異過大)
      * @return Result對象
      */
@@ -95,6 +94,7 @@ public class EmployeeController {
 
     /**
      * 員工退出
+     *
      * @return
      */
     @PostMapping("/logout")
@@ -105,16 +105,42 @@ public class EmployeeController {
 
     /**
      * 修改員工狀態
-     * PathVariable：從URL路徑中獲取參數
+     * note PathVariable：從URL路徑中獲取參數,路徑參數專用註解
+     *
      * @param status 狀態 1:啟用 0:禁用
-     * @param id 員工id
+     * @param id     員工id
      * @return 返回狀態
      */
     @PostMapping("/status/{status}") //當形參和從參數取值的名一致時,不需要再在註解上寫()
     @ApiOperation(value = "修改員工狀態") // 功能描述
-    public Result startOrStop(@PathVariable Integer status , Long id){
-        log.info("啟用/禁用員工帳號:{},{}",status,id);
-        employeeService.startOrStop(status,id);
+    public Result startOrStop(@PathVariable Integer status, Long id) {
+        log.info("啟用/禁用員工帳號:{},{}", status, id);
+        employeeService.startOrStop(status, id);
+        return Result.success();
+    }
+
+    /**
+     * 查詢員工信息,因為是查詢類的功能,需要填上範型
+     * @param id 員工id
+     * @return Result對象
+     */
+    @GetMapping("/{id}")
+    @ApiOperation("根據id查詢員工")
+    public Result<Employee> getById(@PathVariable Long id) {
+        Employee employee = employeeService.getById(id);
+        return Result.success(employee);
+    }
+
+    /**
+     * 修改員工信息
+     * @param employeeDTO 用DTO接收前端傳來的員工資料,還是和save用的DTO一致
+     * @return Result對象
+     */
+    @PutMapping
+    @ApiOperation("修改員工信息")
+    public Result update(@RequestBody EmployeeDTO employeeDTO){
+        log.info("修改員工信息:{}",employeeDTO);
+        employeeService.update(employeeDTO);
         return Result.success();
     }
 }
