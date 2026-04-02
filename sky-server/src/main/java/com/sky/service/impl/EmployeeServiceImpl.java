@@ -34,9 +34,8 @@ public class EmployeeServiceImpl implements EmployeeService {
 
     /**
      * 员工登录
-     *
-     * @param employeeLoginDTO
-     * @return
+     * @param employeeLoginDTO 接收前端數據
+     * @return 返回实体对象
      */
     public Employee login(EmployeeLoginDTO employeeLoginDTO) {
         String username = employeeLoginDTO.getUsername();
@@ -80,13 +79,16 @@ public class EmployeeServiceImpl implements EmployeeService {
         //設置密碼,DTO裡也沒有這個,使用默認密碼
         employee.setPassword(DigestUtils.md5DigestAsHex(PasswordConstant.DEFAULT_PASSWORD.getBytes()));
 
+        /**
+         * 因為在mapping中使用了@AutoFill註解,所以在這裡不需要再手動設置創建時間、修改時間、創建人、修改人等公共字段了,這些都會自動填充
+         */
         //設置當前紀錄的創建時間,系統時間
-        employee.setCreateTime(LocalDateTime.now());//創建時間
-        employee.setUpdateTime(LocalDateTime.now());//修改時間
+        //employee.setCreateTime(LocalDateTime.now());//創建時間
+        //employee.setUpdateTime(LocalDateTime.now());//修改時間
 
         //note 用ThreadLocal技術,在攔截器中(interceptor)獲取當前登錄員工的id,然後放入ThreadLocal中(這個工具類封裝再了BaseContext中),在這裡取出來使用
-        employee.setCreateUser(BaseContext.getCurrentId());
-        employee.setUpdateUser(BaseContext.getCurrentId());
+        //employee.setCreateUser(BaseContext.getCurrentId());
+        //employee.setUpdateUser(BaseContext.getCurrentId());
 
         //持久層注入
         employeeMapper.insert(employee);
@@ -142,8 +144,11 @@ public class EmployeeServiceImpl implements EmployeeService {
     public void update(EmployeeDTO employeeDTO) {
         Employee employee = new Employee();
         BeanUtils.copyProperties(employeeDTO,employee);
-        employee.setUpdateTime(LocalDateTime.now());
-        employee.setUpdateUser(BaseContext.getCurrentId());
+
+        //note 因為在mapping中使用了@AutoFill註解,所以在這裡不需要再手動設置創建時間、修改時間、創建人、修改人等公共字段了,這些都會自動填充
+        //employee.setUpdateTime(LocalDateTime.now());
+        //employee.setUpdateUser(BaseContext.getCurrentId());
+
         employeeMapper.update(employee);
     }
 }
