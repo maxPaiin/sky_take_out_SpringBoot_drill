@@ -53,6 +53,7 @@ public class AliOssUtil {
         }
 
         //文件访问路径规则 https://BucketName.Endpoint/ObjectName
+        //StringBuilder在這裡拼接的就是服務器裡的網址
         StringBuilder stringBuilder = new StringBuilder("https://");
         stringBuilder
                 .append(bucketName)

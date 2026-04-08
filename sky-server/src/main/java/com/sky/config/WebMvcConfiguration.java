@@ -2,6 +2,7 @@ package com.sky.config;
 
 import com.sky.interceptor.JwtTokenAdminInterceptor;
 import com.sky.json.JacksonObjectMapper;
+import com.sky.utils.AliOssUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.checkerframework.checker.nullness.compatqual.NonNullDecl;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -33,7 +34,6 @@ public class WebMvcConfiguration extends WebMvcConfigurationSupport {
 
     /**
      * 注册自定义拦截器
-     *
      * @param registry
      */
     protected void addInterceptors(InterceptorRegistry registry) {
