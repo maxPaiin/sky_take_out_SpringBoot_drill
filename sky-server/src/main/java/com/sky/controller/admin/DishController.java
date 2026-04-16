@@ -11,6 +11,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
+
 @RestController
 @RequestMapping("/admin/dish")
 @Api(tags = "菜品管理")
@@ -44,6 +46,19 @@ public class DishController {
         log.info("菜品分页查询:{}", dishPageQueryDTO);
         PageResult pageResult = dishService.pageQuery(dishPageQueryDTO);
         return Result.success(pageResult);
+    }
+
+    /**
+     * 菜品批量刪除
+     * @param ids 由前端傳遞的參數,由@RequestParam接收和解析
+     * @return Result對象(結果)
+     */
+    @DeleteMapping
+    @ApiOperation("批量删除菜品")
+    public Result delete(@RequestParam List<Long> ids){
+        log.info("批量删除菜品:{}", ids);
+        dishService.deleteBatch(ids);
+        return Result.success();
     }
 
 }
