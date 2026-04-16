@@ -89,10 +89,14 @@ public class DishServiceImpl implements DishService {
         //當前菜品被套餐關聯,不能刪除
         if(!setmealIds.isEmpty())  throw new DeletionNotAllowedException(MessageConstant.DISH_BE_RELATED_BY_SETMEAL);
         //可以刪除的情況下——菜品表中的菜品數據
-        for(Long id : ids){
-            dishMapper.deleteById(id);
-            //刪除和菜品關聯的口味數據
-            dishFlavorMapper.deleteByDishId(id);
-        }
+//        for(Long id : ids){
+//            dishMapper.deleteById(id);
+//            //刪除和菜品關聯的口味數據
+//            dishFlavorMapper.deleteByDishId(id);
+//        }
+        //根據菜品id集合批量刪除菜品數據
+        dishMapper.deleteByIds(ids);
+        //根據菜品id批量刪除菜品口味數據
+        dishFlavorMapper.deleteByDishIds(ids);
     }
 }
