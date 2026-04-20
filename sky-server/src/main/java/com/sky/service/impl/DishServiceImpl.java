@@ -53,7 +53,7 @@ public class DishServiceImpl implements DishService {
 
         //口味是用List的方式放在DishDTO中,所以需要獲取到口味數據,然後對每個口味數據設置菜品id,最後批量插入口味數據到口味表中
         List<DishFlavor> flavors = dishDTO.getFlavors();
-        if(flavors != null && !flavors.isEmpty()){
+        if (flavors != null && !flavors.isEmpty()) {
             flavors.forEach(dishFlavor -> dishFlavor.setDishId(dishId));
             //向口味表插入多條數據
             dishFlavorMapper.insertBatch(flavors);
@@ -62,6 +62,7 @@ public class DishServiceImpl implements DishService {
 
     /**
      * 菜品分页查询
+     *
      * @param dishPageQueryDTO 菜品分页查询条件
      */
     public PageResult pageQuery(DishPageQueryDTO dishPageQueryDTO) {
@@ -73,21 +74,23 @@ public class DishServiceImpl implements DishService {
 
     /**
      * 菜品批量刪除
+     *
      * @param ids 傳入的商品(菜品)ID或是ID集合
      */
     @Override
     @Transactional
     public void deleteBatch(List<Long> ids) {
         //判斷菜品是否能刪除——是否是售賣中的
-        for(Long id : ids){
+        for (Long id : ids) {
             Dish dish = dishMapper.getById(id);
             //菜品起售中,不能刪除
-            if(dish.getStatus() == StatusConstant.ENABLE) throw new DeletionNotAllowedException(MessageConstant.DISH_ON_SALE);
+            if (dish.getStatus() == StatusConstant.ENABLE)
+                throw new DeletionNotAllowedException(MessageConstant.DISH_ON_SALE);
         }
         //被套餐關聯時,也不能刪除
         List<Long> setmealIds = setmealDishMapper.getDishIdsByDishIds(ids);
         //當前菜品被套餐關聯,不能刪除
-        if(!setmealIds.isEmpty())  throw new DeletionNotAllowedException(MessageConstant.DISH_BE_RELATED_BY_SETMEAL);
+        if (!setmealIds.isEmpty()) throw new DeletionNotAllowedException(MessageConstant.DISH_BE_RELATED_BY_SETMEAL);
         //可以刪除的情況下——菜品表中的菜品數據
 //        for(Long id : ids){
 //            dishMapper.deleteById(id);
@@ -98,5 +101,47 @@ public class DishServiceImpl implements DishService {
         dishMapper.deleteByIds(ids);
         //根據菜品id批量刪除菜品口味數據
         dishFlavorMapper.deleteByDishIds(ids);
+    }
+
+    /**
+     * 根据id查询菜品信息
+     *
+     * @param id 菜品id(前端來的),所以這邊用VO來接收,形參寫@PathVariable:指示方法參數應綁定到 URI 模板變數的註解
+     * @return
+     */
+    @Override
+    public DishVO getByIdWithFlavor(Long id) {
+        //根據id查詢菜品數據
+        Dish dish = dishMapper.getById(id);
+        //根據id查詢口味數據
+        List<DishFlavor> dishFlavors = dishFlavorMapper.geByDishId(id);
+        //查詢到的數據封裝到VO中
+        DishVO dishVO = new DishVO();
+        //對象賦值,把VO的數據copy給dish
+        BeanUtils.copyProperties(dish, dishVO);
+        dishVO.setFlavors(dishFlavors);
+        return dishVO;
+    }
+
+    /**
+     * 修改菜品和口味數據
+     * @param dishDTO
+     */
+    @Override
+    public void updateWithFlavor(DishDTO dishDTO) {
+        Dish dish = new Dish();
+        BeanUtils.copyProperties(dishDTO, dish);
+        //修改菜品表基本信息
+        dishMapper.update(dish);
+        //刪除原來的口味數據
+        dishFlavorMapper.deleteByDishId(dish.getId());
+        //重新插入口味數據
+        List<DishFlavor> flavors = dishDTO.getFlavors();
+        if (flavors != null && !flavors.isEmpty()) {
+            flavors.forEach(
+                    dishFlavor -> dishFlavor.setDishId(dishDTO.getId())
+            );
+            dishFlavorMapper.insertBatch(flavors);
+        }
     }
 }
