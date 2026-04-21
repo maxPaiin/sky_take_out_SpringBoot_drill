@@ -9,7 +9,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.converter.HttpMessageConverter;
-import org.springframework.http.converter.cbor.MappingJackson2CborHttpMessageConverter;
+import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurationSupport;
@@ -83,7 +83,7 @@ public class WebMvcConfiguration extends WebMvcConfigurationSupport {
     protected void extendMessageConverters(@NonNullDecl List<HttpMessageConverter<?>> converters) {
         log.info("消息轉換器...");
         //  創建一個消息轉換器的實體
-        MappingJackson2CborHttpMessageConverter converter = new MappingJackson2CborHttpMessageConverter();
+        MappingJackson2HttpMessageConverter converter = new MappingJackson2HttpMessageConverter();
         //  需要為消息轉換器設置一個對象轉換器,可以將java對象序列化為json
         converter.setObjectMapper(new JacksonObjectMapper());
         //  將配置好的消息轉換器追加到mvc框架的轉換器集合中(index = 0 表示自己加入的消息轉換器的優先級)

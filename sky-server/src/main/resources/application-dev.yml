@@ -12,3 +12,8 @@ sky:
     access-key-id: LTAI5tPeFLzsPPT8gG3LPW64
     access-key-secret: U6k1br0Z8ga0IXv3nxbulGTUzy6PdJ7
     bucket-name: sky-itcast
+  redis:
+    host: localhost
+    port: 6379
+    #數據庫編號(redis默認就有16個數據庫,不同數據庫中的數據完全隔離)
+    database: 0

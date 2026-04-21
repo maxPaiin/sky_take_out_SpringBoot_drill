@@ -4,6 +4,7 @@ import com.sky.properties.AliOssProperties;
 import com.sky.utils.AliOssUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -18,7 +19,7 @@ public class OssConifguration {
 
     //這裡需要@Bean註解,這樣項目啟動時,就會放入Spring容器中,以後需要使用AliOssUtil對象的地方,就可以直接注入它
     @Bean
-    @ConditionalOnBean//保證在容器中,只有一個AliOssProperties對象,當沒有這種Bean時,再進行創建
+    @ConditionalOnBean(AliOssProperties.class) //保證在容器中,只有一個AliOssProperties對象,當沒有這種Bean時,再進行創建,這個只是做一個打樣(demo)
     public AliOssUtil aliOssUtil(AliOssProperties aliOssProperties) {
         log.info("開始創建阿里雲文件上傳工具類對象,參數:{}", aliOssProperties);
         return new AliOssUtil(
