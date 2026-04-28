@@ -54,10 +54,15 @@ sky-take-out (父工程 pom)
 │                    Controller 層 (View 層)                    │
 │  接收 HTTP 請求，調用 Service，返回統一 Result<T> 響應           │
 │                                                               │
+│  [管理端 admin]                                                │
 │  EmployeeController ── /admin/employee/**                    │
 │  CategoryController ── /admin/category/**                    │
 │  DishController     ── /admin/dish/**                        │
 │  CommonController   ── /admin/common/** (圖片上傳)            │
+│  ShopController     ── /admin/shop/**    (店鋪營業狀態)        │
+│                                                               │
+│  [用戶端 user]                                                 │
+│  ShopController     ── /user/shop/**     (查詢店鋪狀態)        │
 └─────────────────────────┬───────────────────────────────────┘
                           │ 調用
                           ▼
@@ -102,6 +107,12 @@ sky-take-out (父工程 pom)
 | `CategoryController` | `/admin/category` | 新增分類、分頁查詢、刪除分類、修改分類、啟用/禁用、按類型查詢列表 |
 | `DishController` | `/admin/dish` | 新增菜品(含口味)、分頁查詢、批量刪除、按 ID 查詢(含口味)、修改菜品(含口味) |
 | `CommonController` | `/admin/common` | 圖片上傳 (阿里雲 OSS) |
+| `admin.ShopController` | `/admin/shop` | 設置店鋪營業狀態、查詢店鋪營業狀態 (寫入 Redis) |
+| `user.ShopController` | `/user/shop` | 查詢店鋪營業狀態 (從 Redis 讀取) |
+
+> 兩個 `ShopController` 同名但位於不同套件 (`controller.admin` / `controller.user`)，
+> 透過 `@RestController("adminShopController")` / `@RestController("userShopController")`
+> 顯式指定 Bean 名稱以避免衝突。
 
 **統一回應格式**：所有接口均返回 `Result<T>` 物件
 
@@ -267,6 +278,116 @@ GlobalExceptionHandler (@RestControllerAdvice)
           → 含 "Duplicate entry"? → 解析重複欄位名 → "xxx已存在"
           → 否則 → "未知错误"
 ```
+
+### 5.4 Redis 配置 (Spring Data Redis)
+
+引入 `spring-boot-starter-data-redis`，透過 `RedisConfiguration` 自訂 `RedisTemplate`，
+將 key 的序列化器改為 `StringRedisSerializer`，避免預設 JDK 序列化產生的亂碼字節字首，
+讓 Redis 端的 key 以人類可讀的純字串保存。
+
+```
+RedisConfiguration.redisTemplate(RedisConnectionFactory)
+    │
+    ├── new RedisTemplate<>()
+    ├── setConnectionFactory(factory)    ← 由 SpringBoot 自動裝配 (Lettuce)
+    └── setKeySerializer(StringRedisSerializer)
+         ↑ 僅指定 key 的序列化器;value 保持預設 (後續若要存物件可再補上 JSON 序列化器)
+```
+
+#### 配置檔 (application.yml / application-dev.yml)
+
+```yaml
+# application.yml  (框架層，引用變數)
+spring:
+  redis:
+    host: ${sky.redis.host}
+    port: ${sky.redis.port}
+    database: ${sky.redis.database}   # Redis 預設 16 個庫 (0~15)，彼此資料隔離
+
+# application-dev.yml  (環境層，實際值)
+sky:
+  redis:
+    host: localhost
+    port: 6379
+    database: 0
+```
+
+> 採用「`spring.redis.*` 引用 `sky.redis.*`」的兩段式配置，
+> 延續本專案資料源 / 阿里雲 OSS 一致的風格 —
+> 框架相關欄位集中在 `application.yml`，環境相關實際值放在 `application-dev.yml`，
+> 切換環境時只需替換後者。
+
+#### 使用方式
+
+```java
+@Autowired
+private RedisTemplate redisTemplate;
+
+redisTemplate.opsForValue().set("key", "value");   // String
+redisTemplate.opsForHash()  // Hash
+redisTemplate.opsForList()  // List
+redisTemplate.opsForSet()   // Set
+redisTemplate.opsForZSet()  // Sorted Set
+```
+
+測試入口：`sky-server/src/test/java/com/sky/test/springDataRedisTest.java`
+
+#### 實際應用：店鋪營業狀態
+
+店鋪營業狀態是第一個落地使用 Redis 的業務功能。它的特性很適合用快取保存而非資料表：
+**單一全域標誌、頻繁讀取、極少寫入、不需歷史紀錄**。
+
+```
+┌─────────────────────────┐         ┌──────────────────────────┐
+│  管理端 (員工/老闆)        │         │  用戶端 (顧客小程序)        │
+│  PUT  /admin/shop/{1|0} │  寫入    │  GET  /user/shop/status   │
+│       (1=營業 / 0=打烊)  │ ──────▶│       讀取當前狀態          │
+│  GET  /admin/shop/status│ ◀────── │                           │
+└────────────┬────────────┘  共用    └─────────────┬────────────┘
+             │              key                    │
+             ▼                                     ▼
+        ┌──────────────────────────────────────────────┐
+        │  Redis  key = "shop_status"  value = 1 或 0   │
+        │  (StringRedisSerializer 確保 key 可讀)         │
+        └──────────────────────────────────────────────┘
+```
+
+```java
+// 兩端共用的 key 常量（各自宣告於對應 Controller）
+public static final String KEY = "shop_status";
+
+// 寫入（管理端）
+redisTemplate.opsForValue().set(KEY, status);
+
+// 讀取（兩端共用）
+Integer status = (Integer) redisTemplate.opsForValue().get(KEY);
+```
+
+> **為什麼不寫資料表？**
+> 店鋪狀態本質上是一個全域開關，既不需要分頁、查詢歷史，也不參與任何 JOIN，
+> 走資料庫只會增加一次磁碟 IO。Redis 的 in-memory 讀取對顧客端首頁載入更友善，
+> 同時管理端切換狀態的寫入頻率極低，不存在快取一致性壓力。
+
+### 5.5 Swagger 雙分組（管理端 / 用戶端）
+
+隨著用戶端 (`controller.user`) 開始出現第一個 Controller，原本單一的 Knife4j 文檔
+拆成兩組，讓兩端介面在 `/doc.html` 中分頁顯示，避免管理端與用戶端 API 混雜。
+
+```
+WebMvcConfiguration
+    │
+    ├── @Bean docket()   → groupName("管理端")
+    │                      basePackage("com.sky.controller.admin")
+    │
+    └── @Bean docket2()  → groupName("用戶端")
+                           basePackage("com.sky.controller.user")
+```
+
+兩個 `Docket` 透過不同的 `basePackage` 過濾各自掃描的 Controller，
+`groupName` 則決定 Knife4j 左上角的下拉切換標籤。
+
+> 攔截器 `JwtTokenAdminInterceptor` 仍只攔截 `/admin/**`，
+> 用戶端路由 `/user/**` 目前不會經過 JWT 校驗（後續用戶端登入功能完成後會另行新增）。
 
 ---
 
@@ -622,15 +743,16 @@ DishServiceImpl.getByIdWithFlavor():
 
 ## 七、已完成 vs 待開發功能
 
-### 已完成 (Admin 後台)
+### 已完成
 
-| 模組 | 功能 | 狀態 |
-|---|---|---|
-| 員工管理 | 登入/登出、新增、分頁查詢、啟用/禁用、查詢、修改 | Done |
-| 分類管理 | 新增、分頁查詢、刪除(含關聯檢查)、修改、啟用/禁用、按類型列表 | Done |
-| 菜品管理 | 新增(含口味)、分頁查詢、批量刪除(含業務校驗)、按 ID 查詢(含口味)、修改菜品(含口味) | Done |
-| 通用功能 | 圖片上傳 (OSS) | Done |
-| 橫切功能 | JWT 認證、AOP 自動填充、全域異常處理、Swagger 文檔 | Done |
+| 模組 | 端 | 功能 | 狀態 |
+|---|---|---|---|
+| 員工管理 | Admin | 登入/登出、新增、分頁查詢、啟用/禁用、查詢、修改 | Done |
+| 分類管理 | Admin | 新增、分頁查詢、刪除(含關聯檢查)、修改、啟用/禁用、按類型列表 | Done |
+| 菜品管理 | Admin | 新增(含口味)、分頁查詢、批量刪除(含業務校驗)、按 ID 查詢(含口味)、修改菜品(含口味) | Done |
+| 通用功能 | Admin | 圖片上傳 (OSS) | Done |
+| 店鋪營業狀態 | Admin / User | 管理端讀寫 + 用戶端讀取，狀態存於 Redis | Done |
+| 橫切功能 | — | JWT 認證、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
 
 ### 待開發
 
@@ -638,7 +760,7 @@ DishServiceImpl.getByIdWithFlavor():
 |---|---|---|
 | 菜品管理 | 菜品起售/停售 | Entity/DTO/VO 已定義 |
 | 套餐管理 | 套餐 CRUD、起售/停售 | Entity `Setmeal` + `SetmealDish` 已定義，Mapper 僅有計數查詢 |
-| 用戶端 (C端) | 微信登入、瀏覽菜品/套餐 | Entity `User` 已定義，無 Controller/Service |
+| 用戶端 (C端) | 微信登入、瀏覽菜品/套餐 | Entity `User` 已定義；用戶端 Controller 僅有 `ShopController`（查詢店鋪狀態） |
 | 購物車 | 添加/清空購物車 | Entity `ShoppingCart` 已定義 |
 | 訂單管理 | 下單、支付、訂單狀態流轉 | Entity `Orders` + `OrderDetail` 已定義 |
 | 地址管理 | 收貨地址 CRUD | Entity `AddressBook` 已定義 |
@@ -653,6 +775,7 @@ DishServiceImpl.getByIdWithFlavor():
 |---|---|
 | 框架 | SpringBoot 2.x + Spring + SpringMVC + MyBatis |
 | 資料庫 | MySQL 8.x (Druid 連接池) |
+| 快取 | Redis (Spring Data Redis + Lettuce) |
 | 分頁 | PageHelper |
 | 認證 | JWT (jsonwebtoken) |
 | API 文檔 | Knife4j (Swagger 增強) |
@@ -660,12 +783,14 @@ DishServiceImpl.getByIdWithFlavor():
 | 日誌 | SLF4J + Logback |
 | 工具 | Lombok, BeanUtils |
 | 構建 | Maven 多模組 |
+| JDK | Java 17 |
 
 ---
 
 ## 九、快速啟動
 
 1. 建立 MySQL 資料庫 `sky_take_out` 並匯入建表 SQL
-2. 修改 `sky-server/src/main/resources/application-dev.yml` 中的資料庫帳密
-3. 啟動 `SkyApplication.java`
-4. 訪問 Swagger 文檔：`http://localhost:8080/doc.html`
+2. 啟動本機 Redis (預設 `localhost:6379`，使用 DB 0)
+3. 修改 `sky-server/src/main/resources/application-dev.yml` 中的資料庫 / Redis 連線資訊
+4. 啟動 `SkyApplication.java` (需 JDK 17)
+5. 訪問 Swagger 文檔：`http://localhost:8080/doc.html`
