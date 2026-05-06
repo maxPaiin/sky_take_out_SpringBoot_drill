@@ -63,6 +63,7 @@ sky-take-out (父工程 pom)
 │                                                               │
 │  [用戶端 user]                                                 │
 │  ShopController     ── /user/shop/**     (查詢店鋪狀態)        │
+│  UserController     ── /user/user/**     (微信登錄)            │
 └─────────────────────────┬───────────────────────────────────┘
                           │ 調用
                           ▼
@@ -109,6 +110,7 @@ sky-take-out (父工程 pom)
 | `CommonController` | `/admin/common` | 圖片上傳 (阿里雲 OSS) |
 | `admin.ShopController` | `/admin/shop` | 設置店鋪營業狀態、查詢店鋪營業狀態 (寫入 Redis) |
 | `user.ShopController` | `/user/shop` | 查詢店鋪營業狀態 (從 Redis 讀取) |
+| `user.UserController` | `/user/user` | 微信登錄 (code → openid → JWT)，首次登錄自動註冊 |
 
 > 兩個 `ShopController` 同名但位於不同套件 (`controller.admin` / `controller.user`)，
 > 透過 `@RestController("adminShopController")` / `@RestController("userShopController")`
@@ -368,7 +370,210 @@ Integer status = (Integer) redisTemplate.opsForValue().get(KEY);
 > 走資料庫只會增加一次磁碟 IO。Redis 的 in-memory 讀取對顧客端首頁載入更友善，
 > 同時管理端切換狀態的寫入頻率極低，不存在快取一致性壓力。
 
-### 5.5 Swagger 雙分組（管理端 / 用戶端）
+### 5.5 微信登錄（用戶端 C 端入口）
+
+用戶端的身份識別不走帳號密碼，而是基於微信小程序的 **`code2session`** 機制：
+小程序前端透過 `wx.login()` 拿到一次性憑證 `code`，後端用 `code` + `appid` + `secret`
+向微信伺服器換取使用者唯一識別 `openid`，再以 `openid` 為主鍵建立/查詢本地 `user` 表，
+最後簽發 JWT 回傳給小程序。
+
+#### 整體時序
+
+```
+┌────────────────┐                    ┌─────────────────┐                ┌──────────────────┐
+│  微信小程序前端  │                    │   sky-server     │                │   微信開放平台    │
+│                │                    │  (我們的後端)     │                │ api.weixin.qq.com│
+└───────┬────────┘                    └────────┬────────┘                └─────────┬────────┘
+        │ ① wx.login()                          │                                   │
+        │   取得 code (5min 內有效)              │                                   │
+        │                                       │                                   │
+        │ ② POST /user/user/login              │                                   │
+        │   Body: { "code": "xxxxx" }          │                                   │
+        ├──────────────────────────────────────▶│                                   │
+        │                                       │                                   │
+        │                                       │ ③ GET sns/jscode2session         │
+        │                                       │   ?appid=...&secret=...          │
+        │                                       │   &js_code=code                  │
+        │                                       │   &grant_type=authorization_code │
+        │                                       ├──────────────────────────────────▶│
+        │                                       │                                   │
+        │                                       │ ④ { openid, session_key, ... }   │
+        │                                       │◀──────────────────────────────────┤
+        │                                       │                                   │
+        │                                       │ ⑤ openid == null ?               │
+        │                                       │      └─ throw LoginFailedException│
+        │                                       │                                   │
+        │                                       │ ⑥ SELECT * FROM user             │
+        │                                       │      WHERE openid = ?            │
+        │                                       │                                   │
+        │                                       │ ⑦ user == null ? (首次登錄)       │
+        │                                       │      └─ INSERT INTO user         │
+        │                                       │           (openid, create_time)  │
+        │                                       │                                   │
+        │                                       │ ⑧ JwtUtil.createJWT()            │
+        │                                       │     claims = { USER_ID: user.id }│
+        │                                       │     signKey = user-secret-key     │
+        │                                       │     ttl     = user-ttl            │
+        │                                       │                                   │
+        │ ⑨ Result<UserLoginVO>                 │                                   │
+        │   { id, openid, token }              │                                   │
+        │◀──────────────────────────────────────┤                                   │
+        │                                       │                                   │
+        │ ⑩ 後續請求附帶 token                  │                                   │
+        │   Header: authentication: <jwt>       │                                   │
+        ├──────────────────────────────────────▶│                                   │
+        │                                       │ JwtTokenUserInterceptor          │
+        │                                       │ 解析 token → BaseContext          │
+        │                                       │ (待實作)                          │
+```
+
+#### 為什麼要這樣設計？
+
+- **`code` 是一次性的**：小程序產生的 `code` 只能換一次 `session_key`，且 5 分鐘過期，
+  即使被攔截也無法重複使用。真正的長效憑證是後端簽發的 JWT。
+- **`openid` 是用戶在「本小程序」的唯一識別**：同一個微信用戶在不同小程序的 `openid`
+  不同；它由微信平台給定，後端用它當作本地 `user` 表的天然主鍵候選。
+- **首次登錄即註冊**：使用者不需要事先填表，第一次點開小程序就完成「無感註冊」。
+  其他欄位（手機、頭像、姓名）在後續流程中（如下單填地址）逐步補齊。
+- **`secret` 必須留在後端**：`appid` 是小程序公開識別，但 `secret` 是商家密鑰，
+  絕不能放到小程序前端。`code → openid` 這一跳必須由後端發起。
+
+#### 程式碼鏈路
+
+**Step 1 — Controller 接收 `code`**
+
+```java
+// UserController.java   @RequestMapping("/user/user")
+@PostMapping("/login")
+@ApiOperation("wechat用戶登錄")
+public Result<UserLoginVO> login(@RequestBody UserLoginDTO userLoginDTO){
+    log.info("微信用戶登錄:{}",userLoginDTO.getCode());
+    User user = userService.wxLogin(userLoginDTO);
+
+    //為微信用戶生成jwt令牌
+    Map<String,Object> claims = new HashMap<>();
+    //用戶的唯一標識
+    claims.put(JwtClaimsConstant.USER_ID,user.getId());
+    String token = JwtUtil.createJWT(jwtProperties.getUserSecretKey(), jwtProperties.getUserTtl(), claims);
+
+    UserLoginVO userLoginVO = UserLoginVO.builder()
+            .id(user.getId())
+            .openid(user.getOpenid())
+            .token(token)
+            .build();
+
+    return Result.success(userLoginVO);
+}
+```
+
+> Controller 只做兩件事：① 委託 Service 完成「換取 openid + 註冊」；② 簽發 JWT 並組裝 VO。
+> 任何業務細節（HTTP 呼叫、資料庫存取）都不在這層出現。
+
+**Step 2 — Service 呼叫微信 + 落本地用戶**
+
+```java
+// UserServiceImpl.java
+public static final String WX_LOGIN = "https://api.weixin.qq.com/sns/jscode2session";
+
+@Override
+public User wxLogin(UserLoginDTO userLoginDTO) {
+    //調用微信服務器的接口,獲取當前用戶的openID
+    Map<String,String> map = new HashMap<>();
+    map.put("appid",weChatProperties.getAppid());
+    map.put("secret",weChatProperties.getSecret());
+    map.put("js_code",userLoginDTO.getCode());
+    map.put("grant_type","authorization_code");
+    String json = HttpClientUtil.doGet(WX_LOGIN, map);
+
+    JSONObject jsonObject = JSON.parseObject(json);
+    String openid = jsonObject.getString("openid");
+
+    //判斷OpenID是否獲取到了
+    if(openid == null ) throw new LoginFailedException(MessageConstant.LOGIN_FAILED);
+    //當前用戶是否是新的用戶(對外賣系統來說)
+    User user = userMapper.getByOpenid(openid);
+
+    //如果是新用戶,那麼應該完成註冊(保存到數據庫中)
+    if(user == null) {
+      user = User.builder()
+                .openid(openid)
+                .createTime(LocalDateTime.now())
+                .build();
+      userMapper.insert(user);
+    }
+    //返回一個用戶對象
+    return user;
+}
+```
+
+> 這一層體現了三件事：
+> - **外部 IO（微信 API）封裝在 Service 內**：Controller 不需要知道微信 API 長什麼樣。
+> - **「先查再插」的 upsert 模式**：以 `openid` 為唯一鍵，已存在則沿用、不存在則註冊。
+> - **失敗回拋自定義異常**：`LoginFailedException` 由 `GlobalExceptionHandler`
+>   統一轉成 `Result.error(...)`，不需要 Controller 處理錯誤分支。
+
+**Step 3 — Mapper 兩個方法**
+
+```java
+// UserMapper.java
+@Mapper
+public interface UserMapper {
+
+    @Select("select * from user where openid = #{openid}")
+    User getByOpenid(String openid);                // ← 簡單查詢用註解
+
+    void insert(User user);                          // ← 插入走 XML（之後可能擴欄位）
+}
+```
+
+```xml
+<!-- UserMapper.xml -->
+<insert id="insert" useGeneratedKeys="true" keyProperty="id">
+    insert into user (openid, name, phone, sex, id_number, avatar, create_time)
+    values (#{openid}, #{name}, #{phone},#{sex}, #{idNumber}, #{avatar}, #{createTime})
+</insert>
+```
+
+> `useGeneratedKeys="true" keyProperty="id"` 確保 `INSERT` 後主鍵回填到 `user.id`，
+> 這樣 Service 才能把 `user.getId()` 寫進 JWT claims。
+> 雖然目前只有 `openid` 與 `createTime` 有值，其他欄位先預留位置，未來補頭像、手機號時不必再改 SQL。
+
+#### 配置欄位
+
+```yaml
+# application.yml — 框架層引用
+sky:
+  jwt:
+    user-secret-key: itcast        # 用戶端 JWT 簽名密鑰（建議與 admin 不同）
+    user-ttl: 7200000              # 兩小時
+    user-token-name: authentication # 前端在 Header 帶這個欄位送 token
+  wechat:
+    appid:  ${sky.wechat.appid}
+    secret: ${sky.wechat.secret}
+
+# application-dev.yml — 環境層實值（appid/secret 由商家提供）
+sky:
+  wechat:
+    appid:  
+    secret: 
+```
+
+> 與 Redis、阿里雲 OSS 一致，仍是「`spring.*` / `sky.jwt.*` / `sky.wechat.*` 在 application.yml
+> 引用變數，application-dev.yml 放實值」的兩段式結構。
+
+#### Token 簽發後做什麼？
+
+簽出去的 JWT 之後會由用戶端攔截器 `JwtTokenUserInterceptor` 校驗（待實作）。
+攔截器解析 token 後把 `userId` 寫入 `BaseContext`，後續 `購物車`、`下單`、`地址簿`
+等業務 Service 直接 `BaseContext.getCurrentId()` 即可拿到當前用戶。
+管理端的 `JwtTokenAdminInterceptor` 可作為對照範本。
+
+> 注意：管理端與用戶端的密鑰、TTL、Header 名稱都各自獨立，
+> 兩個攔截器互不干涉、各自只攔自己的路徑前綴（`/admin/**` vs `/user/**`）。
+
+---
+
+### 5.6 Swagger 雙分組（管理端 / 用戶端）
 
 隨著用戶端 (`controller.user`) 開始出現第一個 Controller，原本單一的 Knife4j 文檔
 拆成兩組，讓兩端介面在 `/doc.html` 中分頁顯示，避免管理端與用戶端 API 混雜。
@@ -752,6 +957,7 @@ DishServiceImpl.getByIdWithFlavor():
 | 菜品管理 | Admin | 新增(含口味)、分頁查詢、批量刪除(含業務校驗)、按 ID 查詢(含口味)、修改菜品(含口味) | Done |
 | 通用功能 | Admin | 圖片上傳 (OSS) | Done |
 | 店鋪營業狀態 | Admin / User | 管理端讀寫 + 用戶端讀取，狀態存於 Redis | Done |
+| 微信登錄 | User | code → openid 換取、首次登錄自動註冊、簽發 user JWT | Done |
 | 橫切功能 | — | JWT 認證、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
 
 ### 待開發
@@ -760,7 +966,7 @@ DishServiceImpl.getByIdWithFlavor():
 |---|---|---|
 | 菜品管理 | 菜品起售/停售 | Entity/DTO/VO 已定義 |
 | 套餐管理 | 套餐 CRUD、起售/停售 | Entity `Setmeal` + `SetmealDish` 已定義，Mapper 僅有計數查詢 |
-| 用戶端 (C端) | 微信登入、瀏覽菜品/套餐 | Entity `User` 已定義；用戶端 Controller 僅有 `ShopController`（查詢店鋪狀態） |
+| 用戶端 (C端) | 瀏覽菜品/套餐、用戶端 JWT 攔截器 | 微信登入已完成；尚缺 `JwtTokenUserInterceptor` 校驗用戶 token |
 | 購物車 | 添加/清空購物車 | Entity `ShoppingCart` 已定義 |
 | 訂單管理 | 下單、支付、訂單狀態流轉 | Entity `Orders` + `OrderDetail` 已定義 |
 | 地址管理 | 收貨地址 CRUD | Entity `AddressBook` 已定義 |

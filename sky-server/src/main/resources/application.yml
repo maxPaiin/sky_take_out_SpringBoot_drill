@@ -42,6 +42,12 @@ sky:
     admin-ttl: 7200000
     # 设置前端传递过来的令牌名称
     admin-token-name: token
+
+    #設置用戶的加密密鑰,jwt過期時間和令牌
+    user-secret-key: itcast
+    user-ttl: 7200000
+    user-token-name: authentication
+
     # 這裡是說要配置阿里雲,沒有,就暫時空著,以後用其他服務器進行配置也是一樣的,這只是個練習,知道怎麼回事就行
     # 這裡的字段都是自定義的,其配置屬性類在 sky-common/src/main/java/com/sky/properties/AliOssProperties.java
     # 使用的是引用項,這樣可以不用改配置文件
@@ -53,3 +59,7 @@ sky:
       access-key-secret: ${sky.alioss.access-key-secret}
       bucket-name: ${sky.alioss.bucket-name}
 
+  #wechat的東西,也是不存在的,僅用於佔位
+  wechat:
+    appid: ${sky.wechat.appid}
+    secret: ${sky.wechat.secret}

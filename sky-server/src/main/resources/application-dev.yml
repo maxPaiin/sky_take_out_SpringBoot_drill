@@ -17,3 +17,8 @@ sky:
     port: 6379
     #數據庫編號(redis默認就有16個數據庫,不同數據庫中的數據完全隔離)
     database: 0
+
+  #僅用於佔位
+  wechat:
+    appid:
+    secret:
