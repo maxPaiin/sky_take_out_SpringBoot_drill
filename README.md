@@ -58,12 +58,16 @@ sky-take-out (父工程 pom)
 │  EmployeeController ── /admin/employee/**                    │
 │  CategoryController ── /admin/category/**                    │
 │  DishController     ── /admin/dish/**                        │
+│  SetmealController  ── /admin/setmeal/**  (套餐管理)          │
 │  CommonController   ── /admin/common/** (圖片上傳)            │
 │  ShopController     ── /admin/shop/**    (店鋪營業狀態)        │
 │                                                               │
 │  [用戶端 user]                                                 │
 │  ShopController     ── /user/shop/**     (查詢店鋪狀態)        │
 │  UserController     ── /user/user/**     (微信登錄)            │
+│  CategoryController ── /user/category/** (查詢分類列表)        │
+│  DishController     ── /user/dish/**     (按分類查詢菜品+口味)  │
+│  SetmealController  ── /user/setmeal/**  (按分類查詢套餐)      │
 └─────────────────────────┬───────────────────────────────────┘
                           │ 調用
                           ▼
@@ -74,6 +78,8 @@ sky-take-out (父工程 pom)
 │  EmployeeServiceImpl ── 員工 CRUD + 登入驗證 + MD5 加密        │
 │  CategoryServiceImpl ── 分類 CRUD + 關聯檢查 (菜品/套餐)       │
 │  DishServiceImpl     ── 菜品 CRUD + 口味管理 + @Transactional  │
+│  SetmealServiceImpl  ── 套餐 CRUD + 套餐-菜品關聯管理           │
+│                         起售前校驗套餐內菜品均已起售              │
 └─────────────────────────┬───────────────────────────────────┘
                           │ 調用
                           ▼
@@ -105,16 +111,20 @@ sky-take-out (父工程 pom)
 | Controller | 路由前綴 | 已實現的功能 |
 |---|---|---|
 | `EmployeeController` | `/admin/employee` | 登入、登出、新增員工、分頁查詢、啟用/禁用、按 ID 查詢、修改員工 |
-| `CategoryController` | `/admin/category` | 新增分類、分頁查詢、刪除分類、修改分類、啟用/禁用、按類型查詢列表 |
-| `DishController` | `/admin/dish` | 新增菜品(含口味)、分頁查詢、批量刪除、按 ID 查詢(含口味)、修改菜品(含口味) |
+| `admin.CategoryController` | `/admin/category` | 新增分類、分頁查詢、刪除分類、修改分類、啟用/禁用、按類型查詢列表 |
+| `admin.DishController` | `/admin/dish` | 新增菜品(含口味)、分頁查詢、批量刪除、按 ID 查詢(含口味)、修改菜品(含口味)、起售/停售 |
+| `admin.SetmealController` | `/admin/setmeal` | 新增套餐(含菜品)、分頁查詢、批量刪除、按 ID 查詢(回顯)、修改套餐、起售/停售 |
 | `CommonController` | `/admin/common` | 圖片上傳 (阿里雲 OSS) |
 | `admin.ShopController` | `/admin/shop` | 設置店鋪營業狀態、查詢店鋪營業狀態 (寫入 Redis) |
 | `user.ShopController` | `/user/shop` | 查詢店鋪營業狀態 (從 Redis 讀取) |
 | `user.UserController` | `/user/user` | 微信登錄 (code → openid → JWT)，首次登錄自動註冊 |
+| `user.CategoryController` | `/user/category` | 按類型查詢分類列表 (供顧客端瀏覽) |
+| `user.DishController` | `/user/dish` | 按分類 ID 查詢起售菜品（含口味），無口味菜品返回空 `[]` |
+| `user.SetmealController` | `/user/setmeal` | 按分類 ID 查詢起售套餐；按套餐 ID 查詢套餐包含的菜品詳情 |
 
-> 兩個 `ShopController` 同名但位於不同套件 (`controller.admin` / `controller.user`)，
-> 透過 `@RestController("adminShopController")` / `@RestController("userShopController")`
-> 顯式指定 Bean 名稱以避免衝突。
+> 同名 Controller 衝突規避：`ShopController`、`CategoryController`、`DishController`、`SetmealController`
+> 在 admin / user 套件中各有一份，均透過 `@RestController("adminXxxController")` /
+> `@RestController("userXxxController")` 顯式指定 Bean 名稱以避免 Spring 容器衝突。
 
 **統一回應格式**：所有接口均返回 `Result<T>` 物件
 
@@ -155,6 +165,18 @@ sky-take-out (父工程 pom)
 │      檢查起售狀態 → 檢查套餐關聯 → 批量刪菜品 → 批量刪口味      │
 │    getByIdWithFlavor()→ 查菜品主表 + 查口味子表 → 組裝 DishVO  │
 │    updateWithFlavor() → 動態更新菜品 → 先刪舊口味 → 再批量插入  │
+│    startOrStop()      → 停售時連帶停售包含該菜品的套餐          │
+│    listWithFlavor()   → 按分類+狀態查詢菜品 → 逐條查口味組裝   │
+│                                                                │
+│  SetmealServiceImpl:                                          │
+│    saveWithDish()     → @Transactional                        │
+│      插入套餐 → 取回主鍵 → 批量插入 setmeal_dish 關聯         │
+│    deleteBatch()      → 起售中套餐不可刪 → 刪套餐+刪關聯行      │
+│    getByIdWithDish()  → 查套餐主表 + 查關聯菜品 → 組裝 SetmealVO│
+│    update()           → 更新套餐 → 刪舊關聯 → 插入新關聯        │
+│    startOrStop()      → 起售前校驗套餐內所有菜品均為起售狀態    │
+│    list()             → 按分類+狀態條件查詢套餐                 │
+│    getDishItemById()  → 查套餐包含的菜品名稱/份數/圖片等詳情    │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -164,10 +186,10 @@ sky-take-out (父工程 pom)
 |---|---|---|---|
 | `EmployeeMapper` | employee | 註解 + XML | insert, getByUsername, getById, pageQuery(XML動態SQL), update(XML動態SQL) |
 | `CategoryMapper` | category | 註解 + XML | insert, deleteById, pageQuery(XML), update(XML), list(XML) |
-| `DishMapper` | dish | 註解 + XML | insert(XML), getById, deleteById, deleteByIds(XML動態SQL), countByCategoryId, pageQuery(XML), update(XML動態SQL) |
-| `DishFlavorMapper` | dish_flavor | 註解 + XML | insertBatch(XML), deleteByDishId, deleteByDishIds(XML), geByDishId |
-| `SetmealMapper` | setmeal | 註解 | countByCategoryId |
-| `SetmealDishMapper` | setmeal_dish | XML | getDishIdsByDishIds(XML) |
+| `DishMapper` | dish | 註解 + XML | insert(XML), getById, deleteById, deleteByIds(XML), countByCategoryId, pageQuery(XML), list(XML動態條件), update(XML全欄位動態), getBySetmealId |
+| `DishFlavorMapper` | dish_flavor | 註解 + XML | insertBatch(XML), deleteByDishId, deleteByDishIds(XML批量), getByDishId |
+| `SetmealMapper` | setmeal | 註解 + XML | insert(XML), getById, deleteById, update(XML全欄位動態), pageQuery(XML), list(XML動態條件), countByCategoryId, getDishItemBySetmealId |
+| `SetmealDishMapper` | setmeal_dish | 註解 + XML | insertBatch(XML), deleteBySetmealId, getBySetmealId, getDishIdsByDishIds(XML), getSetmealIdsByDishIds(XML) |
 
 ---
 
@@ -954,19 +976,21 @@ DishServiceImpl.getByIdWithFlavor():
 |---|---|---|---|
 | 員工管理 | Admin | 登入/登出、新增、分頁查詢、啟用/禁用、查詢、修改 | Done |
 | 分類管理 | Admin | 新增、分頁查詢、刪除(含關聯檢查)、修改、啟用/禁用、按類型列表 | Done |
-| 菜品管理 | Admin | 新增(含口味)、分頁查詢、批量刪除(含業務校驗)、按 ID 查詢(含口味)、修改菜品(含口味) | Done |
+| 菜品管理 | Admin | 新增(含口味)、分頁查詢、批量刪除(含業務校驗)、按 ID 查詢(含口味)、修改菜品(含口味)、起售/停售 | Done |
+| 套餐管理 | Admin | 新增(含菜品關聯)、分頁查詢、批量刪除(起售中不可刪)、按 ID 查詢(回顯)、修改套餐、起售/停售(起售前校驗菜品狀態) | Done |
 | 通用功能 | Admin | 圖片上傳 (OSS) | Done |
 | 店鋪營業狀態 | Admin / User | 管理端讀寫 + 用戶端讀取，狀態存於 Redis | Done |
 | 微信登錄 | User | code → openid 換取、首次登錄自動註冊、簽發 user JWT | Done |
-| 橫切功能 | — | JWT 認證、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
+| 分類瀏覽 | User (C端) | 按類型查詢啟用中分類列表 | Done |
+| 菜品瀏覽 | User (C端) | 按分類 ID 查詢起售菜品（含口味，無口味返回空列表） | Done |
+| 套餐瀏覽 | User (C端) | 按分類 ID 查詢起售套餐；按套餐 ID 查詢套餐菜品詳情 | Done |
+| 橫切功能 | — | JWT 認證(Admin)、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
 
 ### 待開發
 
 | 模組 | 功能 | 說明 |
 |---|---|---|
-| 菜品管理 | 菜品起售/停售 | Entity/DTO/VO 已定義 |
-| 套餐管理 | 套餐 CRUD、起售/停售 | Entity `Setmeal` + `SetmealDish` 已定義，Mapper 僅有計數查詢 |
-| 用戶端 (C端) | 瀏覽菜品/套餐、用戶端 JWT 攔截器 | 微信登入已完成；尚缺 `JwtTokenUserInterceptor` 校驗用戶 token |
+| 用戶端 JWT 攔截器 | `JwtTokenUserInterceptor` | 微信登入已完成；尚缺攔截器校驗 `/user/**` 的 user token，購物車/下單等需要身份校驗的接口依賴此項 |
 | 購物車 | 添加/清空購物車 | Entity `ShoppingCart` 已定義 |
 | 訂單管理 | 下單、支付、訂單狀態流轉 | Entity `Orders` + `OrderDetail` 已定義 |
 | 地址管理 | 收貨地址 CRUD | Entity `AddressBook` 已定義 |

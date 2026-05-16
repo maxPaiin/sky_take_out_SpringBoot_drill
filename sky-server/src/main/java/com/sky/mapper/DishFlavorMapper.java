@@ -36,5 +36,5 @@ public interface DishFlavorMapper {
      * @return 菜品口味的List集合
      */
     @Select("select * from dish_flavor where dish_id = #{dishId}")
-    List<DishFlavor> geByDishId(Long DishId);
+    List<DishFlavor> getByDishId(Long DishId);
 }
