@@ -392,6 +392,63 @@ Integer status = (Integer) redisTemplate.opsForValue().get(KEY);
 > 走資料庫只會增加一次磁碟 IO。Redis 的 in-memory 讀取對顧客端首頁載入更友善，
 > 同時管理端切換狀態的寫入頻率極低，不存在快取一致性壓力。
 
+#### 實際應用：菜品列表快取 (Cache-Aside)
+
+顧客端菜品瀏覽（`GET /user/dish/list`）是高頻讀取、低頻寫入的典型場景，
+因此以 **Cache-Aside（旁路快取）** 模式將每個分類的菜品列表存入 Redis，
+避免每次請求都打穿資料庫。
+
+**快取 key 設計**：`dish_{categoryId}`，例如 `dish_12`。
+
+```
+GET /user/dish/list?categoryId=12
+         │
+         ▼
+  Redis.get("dish_12")
+         │
+    ┌────┴────┐
+  存在        不存在
+    │              │
+    ▼              ▼
+直接回傳      DishService.listWithFlavor()
+                   │  查 dish + dish_flavor
+                   ▼
+            Redis.set("dish_12", list)
+                   │
+                   ▼
+              回傳結果
+```
+
+**快取失效策略（admin 端寫入時主動清除）**：
+
+| 操作 | 失效範圍 | 說明 |
+|---|---|---|
+| 新增菜品 `POST /admin/dish` | 精確刪除 `dish_{categoryId}` | 只影響該分類 |
+| 修改菜品 `PUT /admin/dish` | 刪除全部 `dish_*` | 分類可能變更，保守清除 |
+| 批量刪除 `DELETE /admin/dish` | 刪除全部 `dish_*` | 跨分類操作，保守清除 |
+| 起售/停售 `POST /admin/dish/status/{status}` | 刪除全部 `dish_*` | 狀態變更影響展示，保守清除 |
+
+```java
+// admin/DishController — 新增時精確清除
+String key = "dish_" + dishDTO.getCategoryId();
+clearCache(key);
+
+// admin/DishController — 其他寫操作全量清除
+redisTemplate.delete(redisTemplate.keys("dish_*"));
+
+// user/DishController — 讀取時 Cache-Aside
+String key = "dish_" + categoryId;
+List<DishVO> list = (List<DishVO>) redisTemplate.opsForValue().get(key);
+if (list != null && list.size() > 0) return Result.success(list);
+list = dishService.listWithFlavor(dish);
+redisTemplate.opsForValue().set(key, list);
+```
+
+> **注意事項**
+> - 目前快取無設 TTL，資料永久保留直至顯式清除或 Redis 重啟。
+> - `redisTemplate.keys("dish_*")` 是 O(N) 阻塞操作，生產環境建議改用 SCAN 迭代器。
+> - `user/SetmealController` 套餐列表尚未加快取，每次查詢仍直打資料庫。
+
 ### 5.5 微信登錄（用戶端 C 端入口）
 
 用戶端的身份識別不走帳號密碼，而是基於微信小程序的 **`code2session`** 機制：
