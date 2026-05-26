@@ -447,7 +447,60 @@ redisTemplate.opsForValue().set(key, list);
 > **注意事項**
 > - 目前快取無設 TTL，資料永久保留直至顯式清除或 Redis 重啟。
 > - `redisTemplate.keys("dish_*")` 是 O(N) 阻塞操作，生產環境建議改用 SCAN 迭代器。
-> - `user/SetmealController` 套餐列表尚未加快取，每次查詢仍直打資料庫。
+
+#### 實際應用：套餐列表快取 (Spring Cache / @Cacheable)
+
+套餐列表（`GET /user/setmeal/list`）與菜品列表場景相同：高頻讀取、低頻寫入。
+與菜品快取手寫 `RedisTemplate` 的 Cache-Aside 不同，套餐快取改用 **Spring Cache 註解方式**，
+由框架自動管理「讀取時存入、寫入時清除」的快取生命週期，不需要在業務代碼裡直接操作 Redis。
+
+**啟用快取（`SkyApplication.java`）**
+
+```java
+@SpringBootApplication
+@EnableCaching  // ← 開啟 Spring Cache 支援
+public class SkyApplication { ... }
+```
+
+**讀取端（`user/SetmealController.java`）**
+
+```java
+@GetMapping("/list")
+@Cacheable(cacheNames = "setmealCache", key = "#categoryId")
+// Redis key 格式：setmealCache::100
+public Result<List<Setmeal>> list(Long categoryId) { ... }
+```
+
+首次請求時，Spring Cache 呼叫 Service 查資料庫，然後自動將結果序列化並寫入 Redis；
+後續相同 `categoryId` 的請求直接從 Redis 返回，不進 Service。
+
+**寫入端（`admin/SetmealController.java`）**
+
+| 操作 | 快取清除範圍 | 說明 |
+|---|---|---|
+| 新增套餐 `POST /admin/setmeal` | 全量刪除 `setmealCache` | `allEntries = true` |
+| 批量刪除 `DELETE /admin/setmeal` | 全量刪除 `setmealCache` | 跨分類，保守清除 |
+| 起售/停售 `POST /admin/setmeal/status/{status}` | 全量刪除 `setmealCache` | 狀態變更影響展示 |
+| 修改套餐 `PUT /admin/setmeal` | 全量刪除 `setmealCache` | 分類可能變更 |
+
+```java
+@CacheEvict(cacheNames = "setmealCache", allEntries = true)
+public Result delete(@RequestParam List<Long> ids) { ... }
+```
+
+**與菜品快取的方式對比**
+
+| | 菜品快取 | 套餐快取 |
+|---|---|---|
+| 實作方式 | 手寫 `RedisTemplate` (Cache-Aside) | Spring Cache 註解 (`@Cacheable` / `@CacheEvict`) |
+| 代碼侵入性 | 業務方法內有顯式 Redis 操作 | 業務方法保持純粹，快取邏輯靠 AOP 代理 |
+| 序列化 | 需確保 value 實作 `Serializable` | 同左，由 Spring Cache + Redis 序列化器處理 |
+| Key 格式 | `dish_{categoryId}`（手動拼接） | `setmealCache::{categoryId}`（框架自動生成） |
+| 靈活度 | 高（可自訂 TTL、條件、SCAN 等） | 低（需配置 `RedisCacheManager` 才能設 TTL） |
+
+> **何時選哪種？**
+> 快取邏輯簡單（讀存/寫清）時優先用 Spring Cache 註解，代碼更整潔；
+> 需要細粒度控制（TTL、條件快取、SCAN 清除）時改用手動 `RedisTemplate`。
 
 ### 5.5 微信登錄（用戶端 C 端入口）
 
@@ -1041,6 +1094,7 @@ DishServiceImpl.getByIdWithFlavor():
 | 分類瀏覽 | User (C端) | 按類型查詢啟用中分類列表 | Done |
 | 菜品瀏覽 | User (C端) | 按分類 ID 查詢起售菜品（含口味，無口味返回空列表） | Done |
 | 套餐瀏覽 | User (C端) | 按分類 ID 查詢起售套餐；按套餐 ID 查詢套餐菜品詳情 | Done |
+| 套餐列表快取 | User / Admin | Spring Cache `@Cacheable` + `@CacheEvict`，key = `setmealCache::{categoryId}` | Done |
 | 橫切功能 | — | JWT 認證(Admin)、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
 
 ### 待開發
@@ -1062,7 +1116,7 @@ DishServiceImpl.getByIdWithFlavor():
 |---|---|
 | 框架 | SpringBoot 2.x + Spring + SpringMVC + MyBatis |
 | 資料庫 | MySQL 8.x (Druid 連接池) |
-| 快取 | Redis (Spring Data Redis + Lettuce) |
+| 快取 | Redis (Spring Data Redis + Lettuce) + Spring Cache (`@Cacheable` / `@CacheEvict`) |
 | 分頁 | PageHelper |
 | 認證 | JWT (jsonwebtoken) |
 | API 文檔 | Knife4j (Swagger 增強) |
