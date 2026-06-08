@@ -68,7 +68,7 @@ sky-take-out (父工程 pom)
 │  CategoryController ── /user/category/** (查詢分類列表)        │
 │  DishController     ── /user/dish/**     (按分類查詢菜品+口味)  │
 │  SetmealController  ── /user/setmeal/**  (按分類查詢套餐)      │
-│  ShoppingCartController ─ /user/shoppingCart/** (添加購物車)   │
+│  ShoppingCartController ─ /user/shoppingCart/** (購物車增刪查) │
 └─────────────────────────┬───────────────────────────────────┘
                           │ 調用
                           ▼
@@ -122,7 +122,7 @@ sky-take-out (父工程 pom)
 | `user.CategoryController` | `/user/category` | 按類型查詢分類列表 (供顧客端瀏覽) |
 | `user.DishController` | `/user/dish` | 按分類 ID 查詢起售菜品（含口味），無口味菜品返回空 `[]` |
 | `user.SetmealController` | `/user/setmeal` | 按分類 ID 查詢起售套餐；按套餐 ID 查詢套餐包含的菜品詳情 |
-| `user.ShoppingCartController` | `/user/shoppingCart` | 添加商品至購物車（菜品/套餐，已存在則數量+1）|
+| `user.ShoppingCartController` | `/user/shoppingCart` | 添加商品（菜品/套餐，已存在則 +1）、查看列表、清空、刪減單品（數量 -1，減到 0 刪行）|
 
 > 同名 Controller 衝突規避：`ShopController`、`CategoryController`、`DishController`、`SetmealController`
 > 在 admin / user 套件中各有一份，均透過 `@RestController("adminXxxController")` /
@@ -192,7 +192,7 @@ sky-take-out (父工程 pom)
 | `DishFlavorMapper` | dish_flavor | 註解 + XML | insertBatch(XML), deleteByDishId, deleteByDishIds(XML批量), getByDishId |
 | `SetmealMapper` | setmeal | 註解 + XML | insert(XML), getById, deleteById, update(XML全欄位動態), pageQuery(XML), list(XML動態條件), countByCategoryId, getDishItemBySetmealId |
 | `SetmealDishMapper` | setmeal_dish | 註解 + XML | insertBatch(XML), deleteBySetmealId, getBySetmealId, getDishIdsByDishIds(XML), getSetmealIdsByDishIds(XML) |
-| `ShoppingCartMapper` | shopping_cart | 註解 + XML | list(XML動態條件), updateNumberById(註解), insert(註解) |
+| `ShoppingCartMapper` | shopping_cart | 註解 + XML | list(XML動態條件), updateNumberById(註解), insert(註解), deleteByUserId(註解), deleteById(註解) |
 
 ---
 
@@ -731,13 +731,26 @@ WebMvcConfiguration
 
 ---
 
-### 5.7 購物車（添加商品）
+### 5.7 購物車（增 / 刪 / 查）
 
 用戶端購物車是「以當前登入用戶為維度」的暫存資料：同一用戶重複加入同一商品時不再新增列，
 而是把既有列的 `number + 1`；不存在時才插入一條，並從 `dish` / `setmeal` 主表把
 **名稱、圖片、單價**冗餘快照寫入購物車列（下單前商品可能改價，購物車保留加入當下的展示值）。
 
-#### 判斷邏輯（存在則 +1，否則插入）
+#### 接口一覽
+
+| 方法 | 路徑 | 功能 | 入參 |
+|---|---|---|---|
+| `POST` | `/user/shoppingCart/add` | 添加商品（已存在則 +1） | `ShoppingCartDTO` |
+| `GET` | `/user/shoppingCart/list` | 查看當前用戶購物車 | — |
+| `DELETE` | `/user/shoppingCart/clean` | 清空當前用戶購物車 | — |
+| `POST` | `/user/shoppingCart/sub` | 刪減單品（-1，減到 0 刪行） | `ShoppingCartDTO`（`dishId` / `setmealId` / `dishFlavor`） |
+
+> 「刪減」採官方小程序契約 `POST /user/shoppingCart/sub`，以「商品維度」
+> （`dishId` / `setmealId` / `dishFlavor`）而非購物車行主鍵定位購物車項，
+> 與 `add` 對稱、可直接對接官方前端。
+
+#### 添加判斷邏輯（存在則 +1，否則插入）
 
 ```
 POST /user/shoppingCart/add
@@ -777,6 +790,42 @@ ShoppingCartServiceImpl.addShoppingCart()
     </where>
 </select>
 ```
+
+#### 查看與清空
+
+- **查看** `GET /list`：以 `BaseContext.getCurrentId()` 取當前用戶，呼叫 `list()` 返回該用戶全部購物車列。
+- **清空** `DELETE /clean`：`deleteByUserId(currentId)` 一次刪光當前用戶的所有列（如結帳後、手動清空）。
+
+#### 刪減單品（sub，與 add 對稱）
+
+「刪減」是「添加」的逆操作,流程刻意與 `addShoppingCart` 對稱:都用
+`user_id + dishId/setmealId + dishFlavor` 透過 `list()` 動態查詢定位購物車項,
+差別只在查到之後是 +1 還是 -1。由於 `list()` 的 SQL 永遠帶 `user_id` 條件,
+**越權問題天然不存在** —— 用戶只可能定位到自己的購物車列。
+
+```
+POST /user/shoppingCart/sub
+Body: { dishId / setmealId, dishFlavor }
+  │
+  ▼
+ShoppingCartServiceImpl.subShoppingCart(dto)
+  │
+  ① DTO → ShoppingCart,並補上 userId = BaseContext.getCurrentId()
+  │
+  ② list = shoppingCartMapper.list(cart)   ← 與 add 共用同一條動態查詢(含 user_id)
+  │
+  ├── list 為空（不存在於我的購物車）──▶ 直接返回
+  │
+  └── cart = list.get(0)
+        ├── number > 1  ──▶ number - 1 → updateNumberById()   (UPDATE)
+        └── number == 1 ──▶ deleteById(cart.getId())          (DELETE 整列)
+```
+
+> **為什麼用 `list()` 而不是直接用行主鍵刪?**
+> 官方前端「-」按鈕手上只有商品資訊(`dishId` / `setmealId` / `dishFlavor`),未必持有
+> 購物車行主鍵;以商品維度定位才能與 `add` 共用同一套查詢、並與官方契約相容。
+> 需要先讀出該列當前 `number` 才能決定「減 1」還是「刪整列」,這次讀取無法省略。
+> `deleteById` 憑主鍵刪除,但主鍵來自上一步含 `user_id` 條件的查詢結果,故仍屬當前用戶。
 
 > ⚠️ **前置依賴（尚未完成）**：本功能透過 `BaseContext.getCurrentId()` 取得當前用戶，
 > 但用戶端攔截器 `JwtTokenUserInterceptor` 目前**仍未實作、也未在 `WebMvcConfiguration` 註冊**
@@ -1152,7 +1201,7 @@ DishServiceImpl.getByIdWithFlavor():
 | 分類瀏覽 | User (C端) | 按類型查詢啟用中分類列表 | Done |
 | 菜品瀏覽 | User (C端) | 按分類 ID 查詢起售菜品（含口味，無口味返回空列表） | Done |
 | 套餐瀏覽 | User (C端) | 按分類 ID 查詢起售套餐；按套餐 ID 查詢套餐菜品詳情 | Done |
-| 購物車 | User (C端) | 添加商品至購物車（已存在則 +1，否則插入冗餘快照） | 部分（依賴用戶端攔截器） |
+| 購物車 | User (C端) | 添加（已存在則 +1）、查看列表、清空、刪減單品（`sub`，-1，減到 0 刪行，與 add 對稱） | 部分（依賴用戶端攔截器） |
 | 套餐列表快取 | User / Admin | Spring Cache `@Cacheable` + `@CacheEvict`，key = `setmealCache::{categoryId}` | Done |
 | 橫切功能 | — | JWT 認證(Admin)、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
 
@@ -1160,8 +1209,7 @@ DishServiceImpl.getByIdWithFlavor():
 
 | 模組 | 功能 | 說明 |
 |---|---|---|
-| 用戶端 JWT 攔截器 | `JwtTokenUserInterceptor` | 微信登入已完成；尚缺攔截器校驗 `/user/**` 的 user token 並把 `userId` 寫入 `BaseContext`。**購物車「添加」已實作但取不到 `userId`，必須先補此項才能跑通** |
-| 購物車 | 查詢列表、修改數量、清空 | 「添加」已完成；尚缺查詢 / 刪減 / 清空 |
+| 用戶端 JWT 攔截器 | `JwtTokenUserInterceptor` | 微信登入已完成；尚缺攔截器校驗 `/user/**` 的 user token 並把 `userId` 寫入 `BaseContext`。**購物車各接口（增/刪/查）已實作但取不到 `userId`，必須先補此項才能跑通** |
 | 訂單管理 | 下單、支付、訂單狀態流轉 | Entity `Orders` + `OrderDetail` 已定義 |
 | 地址管理 | 收貨地址 CRUD | Entity `AddressBook` 已定義 |
 | 數據統計 | 營業額、訂單、用戶、銷量 Top10 | VO 已定義 (`TurnoverReportVO` 等) |

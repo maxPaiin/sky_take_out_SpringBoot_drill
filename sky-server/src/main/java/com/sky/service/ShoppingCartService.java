@@ -16,4 +16,10 @@ public interface ShoppingCartService {
     List<ShoppingCart> showShoppingCart();
 
     void cleanShoppingCart();
+
+    /**
+     * 刪減購物車中一個商品(數量-1,減到0則刪除整行)
+     * @param shoppingCartDTO 商品標識(dishId/setmealId/dishFlavor)
+     */
+    void subShoppingCart(ShoppingCartDTO shoppingCartDTO);
 }
