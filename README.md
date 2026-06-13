@@ -69,6 +69,8 @@ sky-take-out (父工程 pom)
 │  DishController     ── /user/dish/**     (按分類查詢菜品+口味)  │
 │  SetmealController  ── /user/setmeal/**  (按分類查詢套餐)      │
 │  ShoppingCartController ─ /user/shoppingCart/** (購物車增刪查) │
+│  AddressBookController ─ /user/addressBook/** (收貨地址 CRUD)  │
+│  OrderController    ── /user/order/**    (用戶下單)           │
 └─────────────────────────┬───────────────────────────────────┘
                           │ 調用
                           ▼
@@ -123,8 +125,12 @@ sky-take-out (父工程 pom)
 | `user.DishController` | `/user/dish` | 按分類 ID 查詢起售菜品（含口味），無口味菜品返回空 `[]` |
 | `user.SetmealController` | `/user/setmeal` | 按分類 ID 查詢起售套餐；按套餐 ID 查詢套餐包含的菜品詳情 |
 | `user.ShoppingCartController` | `/user/shoppingCart` | 添加商品（菜品/套餐，已存在則 +1）、查看列表、清空、刪減單品（數量 -1，減到 0 刪行）|
+| `user.AddressBookController` | `/user/addressBook` | 新增地址、列表查詢、按 ID 查詢、修改、刪除、設為預設、查詢預設地址 |
+| `user.OrderController` | `/user/order` | 用戶下單（提交訂單，校驗地址/購物車 → 寫入 orders + order_detail → 清空購物車） |
 
-> 同名 Controller 衝突規避：`ShopController`、`CategoryController`、`DishController`、`SetmealController`
+> 同名 Controller 衝突規避：`OrderController` 亦在 admin / user 端各有一份，
+> 以 `@RestController("userOrderController")` 顯式命名避免衝突。其餘
+> `ShopController`、`CategoryController`、`DishController`、`SetmealController`
 > 在 admin / user 套件中各有一份，均透過 `@RestController("adminXxxController")` /
 > `@RestController("userXxxController")` 顯式指定 Bean 名稱以避免 Spring 容器衝突。
 
@@ -193,6 +199,9 @@ sky-take-out (父工程 pom)
 | `SetmealMapper` | setmeal | 註解 + XML | insert(XML), getById, deleteById, update(XML全欄位動態), pageQuery(XML), list(XML動態條件), countByCategoryId, getDishItemBySetmealId |
 | `SetmealDishMapper` | setmeal_dish | 註解 + XML | insertBatch(XML), deleteBySetmealId, getBySetmealId, getDishIdsByDishIds(XML), getSetmealIdsByDishIds(XML) |
 | `ShoppingCartMapper` | shopping_cart | 註解 + XML | list(XML動態條件), updateNumberById(註解), insert(註解), deleteByUserId(註解), deleteById(註解) |
+| `AddressBookMapper` | address_book | 註解 | insert, list(動態條件), getById, update, updateIsDefaultByUserId, deleteById |
+| `OrderMapper` | orders | XML | insert(XML, useGeneratedKeys 回填主鍵) |
+| `OrderDetailMapper` | order_detail | XML | insertBatch(XML foreach 批量插入) |
 
 ---
 
@@ -1202,6 +1211,7 @@ DishServiceImpl.getByIdWithFlavor():
 | 菜品瀏覽 | User (C端) | 按分類 ID 查詢起售菜品（含口味，無口味返回空列表） | Done |
 | 套餐瀏覽 | User (C端) | 按分類 ID 查詢起售套餐；按套餐 ID 查詢套餐菜品詳情 | Done |
 | 購物車 | User (C端) | 添加（已存在則 +1）、查看列表、清空、刪減單品（`sub`，-1，減到 0 刪行，與 add 對稱） | 部分（依賴用戶端攔截器） |
+| 地址管理 | User (C端) | 收貨地址新增、列表、按 ID 查詢、修改、刪除、設為預設、查詢預設地址 | Done |
 | 套餐列表快取 | User / Admin | Spring Cache `@Cacheable` + `@CacheEvict`，key = `setmealCache::{categoryId}` | Done |
 | 橫切功能 | — | JWT 認證(Admin)、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
 
@@ -1210,8 +1220,8 @@ DishServiceImpl.getByIdWithFlavor():
 | 模組 | 功能 | 說明 |
 |---|---|---|
 | 用戶端 JWT 攔截器 | `JwtTokenUserInterceptor` | 微信登入已完成；尚缺攔截器校驗 `/user/**` 的 user token 並把 `userId` 寫入 `BaseContext`。**購物車各接口（增/刪/查）已實作但取不到 `userId`，必須先補此項才能跑通** |
-| 訂單管理 | 下單、支付、訂單狀態流轉 | Entity `Orders` + `OrderDetail` 已定義 |
-| 地址管理 | 收貨地址 CRUD | Entity `AddressBook` 已定義 |
+| 訂單下單 | `POST /user/order/submit` | **進行中**：Controller / Service / Mapper 已搭好骨架，但 `submitOrder` 尚有缺陷待修——明細迴圈遍歷了空集合（應遍歷購物車 `list`）、`OrderMapper.xml` 屬性名 `#{paystatus}` 拼錯（應為 `#{payStatus}`）、`order_detail` 漏插 `number`、缺 `@Transactional`。修正前無法跑通 |
+| 訂單流轉 | 支付、催單、接單/拒單、派送、狀態查詢、歷史訂單 | 未開始；下單跑通後接續 |
 | 數據統計 | 營業額、訂單、用戶、銷量 Top10 | VO 已定義 (`TurnoverReportVO` 等) |
 | WebSocket | 來單提醒、催單 | 未開始 |
 
