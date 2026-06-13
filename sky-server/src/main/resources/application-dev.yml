@@ -19,6 +19,16 @@ sky:
     database: 0
 
   #僅用於佔位
+  #沒有微信支付相關的證書/apiKey/解密密鑰
   wechat:
     appid:
     secret:
+    mchid:
+    mchSerialNo:
+    privateKeyFilePath:
+    apiV3Key:
+    weChatPayCertFilePath:
+    #支付成功後的回調地址
+    notifyUrl:
+    #退款成功後的回調地址
+    refundNotifyUrl:

@@ -70,7 +70,10 @@ sky-take-out (父工程 pom)
 │  SetmealController  ── /user/setmeal/**  (按分類查詢套餐)      │
 │  ShoppingCartController ─ /user/shoppingCart/** (購物車增刪查) │
 │  AddressBookController ─ /user/addressBook/** (收貨地址 CRUD)  │
-│  OrderController    ── /user/order/**    (用戶下單)           │
+│  OrderController    ── /user/order/**    (用戶下單 + 訂單支付)  │
+│                                                               │
+│  [支付回調 notify]（微信伺服器回呼，不過 JWT 攔截器）           │
+│  PayNotifyController ── /notify/paySuccess (支付成功回調)      │
 └─────────────────────────┬───────────────────────────────────┘
                           │ 調用
                           ▼
@@ -126,7 +129,8 @@ sky-take-out (父工程 pom)
 | `user.SetmealController` | `/user/setmeal` | 按分類 ID 查詢起售套餐；按套餐 ID 查詢套餐包含的菜品詳情 |
 | `user.ShoppingCartController` | `/user/shoppingCart` | 添加商品（菜品/套餐，已存在則 +1）、查看列表、清空、刪減單品（數量 -1，減到 0 刪行）|
 | `user.AddressBookController` | `/user/addressBook` | 新增地址、列表查詢、按 ID 查詢、修改、刪除、設為預設、查詢預設地址 |
-| `user.OrderController` | `/user/order` | 用戶下單（提交訂單，校驗地址/購物車 → 寫入 orders + order_detail → 清空購物車） |
+| `user.OrderController` | `/user/order` | 用戶下單（提交訂單，校驗地址/購物車 → 寫入 orders + order_detail → 清空購物車）、訂單支付（呼叫微信支付生成預支付交易單） |
+| `nofity.PayNotifyController` | `/notify` | 微信支付成功回調（解密報文 → 修改訂單狀態）— 不經 JWT 攔截器，由微信伺服器直接回呼 |
 
 > 同名 Controller 衝突規避：`OrderController` 亦在 admin / user 端各有一份，
 > 以 `@RestController("userOrderController")` 顯式命名避免衝突。其餘
@@ -844,6 +848,102 @@ ShoppingCartServiceImpl.subShoppingCart(dto)
 
 ---
 
+### 5.8 微信支付（下單支付 / 支付回調）
+
+接續「下單」之後的環節：前端拿到訂單號後呼叫支付接口，後端透過微信支付 **JSAPI 統一下單**
+換取「預支付交易單」並二次簽名回傳給小程序調起收銀台；用戶付款後，微信伺服器**主動回呼**
+後端的 `/notify/paySuccess`，後端解密報文、把訂單狀態改為「待接單 / 已支付」。
+
+> ⚠️ **本機無法實跑**：本倉庫**不具備微信支付商戶資質**，也沒有對應的商戶證書 /
+> `apiV3Key` / 私鑰，`application-dev.yml` 的 `sky.wechat` 全為空佔位。因此本節描述的是
+> **程式碼鏈路與邏輯完整性**，呼叫 `weChatPayUtil.pay()` 在真實環境才能成功；
+> 支付金額目前也**寫死為 0.01 元**（`OrderServiceImpl.payment`），未取用真實訂單金額。
+
+#### 接口一覽
+
+| 方法 | 路徑 | 功能 | 入參 / 觸發方 |
+|---|---|---|---|
+| `PUT` | `/user/order/payment` | 訂單支付：生成預支付交易單 | `OrdersPaymentDTO`（前端調用） |
+| `POST` | `/notify/paySuccess` | 支付成功回調：改訂單狀態 | 加密報文（**微信伺服器**回呼，不過 JWT 攔截器） |
+
+#### 整體時序
+
+```
+ 小程序前端              sky-server                    微信支付平台
+    │                       │                              │
+    │ PUT /user/order/payment(orderNumber)                 │
+    │──────────────────────▶│                              │
+    │                       │ ① userMapper.getById → openid │
+    │                       │ ② weChatPayUtil.pay()         │
+    │                       │   jsapi 統一下單 ─────────────▶│
+    │                       │◀──────────── prepay_id ───────│
+    │                       │ ③ 二次簽名(SHA256withRSA)      │
+    │◀── OrderPaymentVO ────│   (timeStamp/nonceStr/        │
+    │   (調起收銀台所需參數)  │    package/signType/paySign)  │
+    │                       │                              │
+    │ ④ 用戶輸入密碼付款 ───────────────────────────────────▶│
+    │                       │                              │
+    │                       │◀═══ POST /notify/paySuccess ══│ (微信主動回呼，加密)
+    │                       │ ⑤ 解密(AesUtil + apiV3Key)    │
+    │                       │ ⑥ orderService.paySuccess     │
+    │                       │   status=待接單, payStatus=已付 │
+    │                       │ ⑦ 回 {code:SUCCESS} 給微信 ───▶│
+```
+
+#### 程式碼鏈路
+
+**(A) 發起支付** — `OrderServiceImpl.payment(OrdersPaymentDTO)`
+
+```
+① userId = BaseContext.getCurrentId()  → userMapper.getById(userId) 取 openid
+② weChatPayUtil.pay(orderNumber, 0.01, "苍穹外卖订单", openid)
+       └─ jsapi() 統一下單 → 拿 prepay_id → 二次簽名組裝 JSONObject
+③ 若回傳含 code == "ORDERPAID" → 拋 OrderBusinessException("该订单已支付")
+④ jsonObject.toJavaObject(OrderPaymentVO) + 手動 setPackageStr(getString("package"))
+       （"package" 是保留字，無法直接映射到 packageStr，故單獨塞）
+⑤ return OrderPaymentVO {nonceStr, paySign, timeStamp, signType, packageStr}
+```
+
+**(B) 支付回調** — `PayNotifyController.paySuccessNotify`
+
+```
+① readData(request)            讀取微信 POST 的原始 JSON 報文
+② decryptData(body)            取 resource.{ciphertext,nonce,associated_data}
+                               AesUtil(apiV3Key).decryptToString(...) 解出明文
+③ 解析 out_trade_no(商戶訂單號) / transaction_id(微信交易號)
+④ orderService.paySuccess(outTradeNo)
+       └─ getByNumber(outTradeNo) → update{status=待接單, payStatus=已付, checkoutTime=now}
+⑤ responseToWeixin(response)   回 200 + {code:SUCCESS, message:SUCCESS}
+                               （未回 SUCCESS 微信會持續重發回調）
+```
+
+#### 配置欄位（`sky.wechat`，對應 `WeChatProperties`）
+
+| YAML key | 欄位 | 說明 |
+|---|---|---|
+| `appid` / `secret` | appid / secret | 小程序 appid 與密鑰（與微信登錄共用） |
+| `mchid` | mchid | 商戶號 |
+| `mchSerialNo` | mchSerialNo | 商戶 API 證書序列號 |
+| `privateKeyFilePath` | privateKeyFilePath | 商戶私鑰檔路徑（下單簽名用） |
+| `apiV3Key` | apiV3Key | APIv3 密鑰（**回調報文解密用**） |
+| `weChatPayCertFilePath` | weChatPayCertFilePath | 微信支付平台證書路徑 |
+| `notifyUrl` | notifyUrl | 支付成功回調地址 |
+| `refundNotifyUrl` | refundNotifyUrl | 退款成功回調地址 |
+
+> ⚠️ 早期 YAML 把後兩個 key 誤寫為 `weChatCertfilePath` / `noteifyUrl`，與 `WeChatProperties`
+> 欄位名不符，Spring 寬鬆綁定無法匹配 → 填入真實值時會綁成 `null`（下單 `notify_url` 為空、
+> 載入平台證書 NPE）。**現已更正為 `weChatPayCertFilePath` / `notifyUrl`。**
+
+#### 已知限制 / 待補（誠實標註）
+
+- **「來單提醒」未實現**：回調註解寫了「修改訂單狀態、來單提醒」，但 `paySuccess` 只更新狀態；
+  全專案尚無任何 WebSocket，付款後商家端的來單推送這一步是缺的（見第七節）。
+- **回調非冪等**：微信會重發回調，`paySuccess` 未判斷 `payStatus` 是否已為「已付」即無條件 update。
+- **回調未判空**：`getByNumber` 查不到訂單時 `ordersDB.getId()` 會 NPE。
+- **未驗簽**：僅用 `apiV3Key` 解密，未校驗 `Wechatpay-Signature` 請求頭，無法完全防偽造回調。
+
+---
+
 ## 六、數據流轉模型 (DTO / Entity / VO)
 
 ```
@@ -1212,6 +1312,7 @@ DishServiceImpl.getByIdWithFlavor():
 | 套餐瀏覽 | User (C端) | 按分類 ID 查詢起售套餐；按套餐 ID 查詢套餐菜品詳情 | Done |
 | 購物車 | User (C端) | 添加（已存在則 +1）、查看列表、清空、刪減單品（`sub`，-1，減到 0 刪行，與 add 對稱） | 部分（依賴用戶端攔截器） |
 | 地址管理 | User (C端) | 收貨地址新增、列表、按 ID 查詢、修改、刪除、設為預設、查詢預設地址 | Done |
+| 微信支付 | User (C端) | 下單支付（JSAPI 統一下單 + 二次簽名）、支付成功回調（解密 → 改訂單狀態） | 程式碼完成（無商戶資質，無法實跑；金額寫死 0.01、缺來單提醒/冪等/驗簽） |
 | 套餐列表快取 | User / Admin | Spring Cache `@Cacheable` + `@CacheEvict`，key = `setmealCache::{categoryId}` | Done |
 | 橫切功能 | — | JWT 認證(Admin)、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
 
@@ -1221,9 +1322,9 @@ DishServiceImpl.getByIdWithFlavor():
 |---|---|---|
 | 用戶端 JWT 攔截器 | `JwtTokenUserInterceptor` | 微信登入已完成；尚缺攔截器校驗 `/user/**` 的 user token 並把 `userId` 寫入 `BaseContext`。**購物車各接口（增/刪/查）已實作但取不到 `userId`，必須先補此項才能跑通** |
 | 訂單下單 | `POST /user/order/submit` | **進行中**：Controller / Service / Mapper 已搭好骨架，但 `submitOrder` 尚有缺陷待修——明細迴圈遍歷了空集合（應遍歷購物車 `list`）、`OrderMapper.xml` 屬性名 `#{paystatus}` 拼錯（應為 `#{payStatus}`）、`order_detail` 漏插 `number`、缺 `@Transactional`。修正前無法跑通 |
-| 訂單流轉 | 支付、催單、接單/拒單、派送、狀態查詢、歷史訂單 | 未開始；下單跑通後接續 |
+| 訂單流轉 | 催單、接單/拒單、派送、狀態查詢、歷史訂單 | 未開始（**支付**程式碼已完成，見已完成表）；下單跑通後接續 |
 | 數據統計 | 營業額、訂單、用戶、銷量 Top10 | VO 已定義 (`TurnoverReportVO` 等) |
-| WebSocket | 來單提醒、催單 | 未開始 |
+| WebSocket | 來單提醒、催單 | 未開始；支付回調 `paySuccess` 已預留「來單提醒」位置但尚未推送 |
 
 ---
 
