@@ -944,6 +944,127 @@ ShoppingCartServiceImpl.subShoppingCart(dto)
 
 ---
 
+### 5.9 訂單流轉（用戶端歷史訂單 / 商家端訂單管理）
+
+支付完成後，訂單進入完整的狀態機流轉：用戶端可查歷史、看詳情、取消、再來一單；商家端可搜尋、
+統計、接單、拒單、派送、完成。兩端共用同一套 `OrderService` / `OrderMapper`，用 `Orders` 的
+**狀態常量**驅動整個生命週期。
+
+#### 訂單狀態機（`Orders` 常量）
+
+```
+ PENDING_PAYMENT(1)  待付款
+        │ 支付回調 paySuccess
+        ▼
+ TO_BE_CONFIRMED(2)  待接單 ──── 商家 rejection 拒單 ──▶ CANCELLED(6) 已取消
+        │ 商家 confirm 接單                              ▲
+        ▼                                                │ 用戶 cancel（僅 1/2 狀態）
+ CONFIRMED(3)        已接單 ──── 商家 cancel 取消 ───────┘
+        │ 商家 delivery 派送（僅 3 狀態）
+        ▼
+ DELIVERY_IN_PROGRESS(4) 派送中
+        │ 商家 complete 完成（僅 4 狀態）
+        ▼
+ COMPLETED(5)        已完成
+
+ 付款狀態 payStatus：UN_PAID(0) / PAID(1) / REFUND(2)
+```
+
+#### 接口一覽
+
+| 端 | 方法 | 路徑 | 功能 | Service 方法 |
+|---|---|---|---|---|
+| User | `GET` | `/user/order/historyOrders` | 歷史訂單分頁查詢（可按狀態） | `pageQuery4User` |
+| User | `GET` | `/user/order/orderDetail/{id}` | 訂單詳情（含明細） | `details` |
+| User | `PUT` | `/user/order/cancel/{id}` | 用戶取消訂單（待接單需退款） | `userCancelById` |
+| User | `POST` | `/user/order/repetition/{id}` | 再來一單（明細回灌購物車） | `repetition` |
+| Admin | `GET` | `/admin/order/conditionSearch` | 訂單搜尋（號碼/手機/狀態/時間） | `conditionSearch` |
+| Admin | `GET` | `/admin/order/statistics` | 各狀態訂單數量統計 | `statistics` |
+| Admin | `GET` | `/admin/order/details/{id}` | 訂單詳情 | `details` |
+| Admin | `PUT` | `/admin/order/confirm` | 接單 | `confirm` |
+| Admin | `PUT` | `/admin/order/rejection` | 拒單（已付需退款） | `rejection` |
+| Admin | `PUT` | `/admin/order/cancel` | 商家取消（已付需退款） | `cancel` |
+| Admin | `PUT` | `/admin/order/delivery/{id}` | 派送訂單 | `delivery` |
+| Admin | `PUT` | `/admin/order/complete/{id}` | 完成訂單 | `complete` |
+
+> 商家端 Controller 為新建的 `admin/OrderController`，以 `@RestController("adminOrderController")`
+> 命名避免與用戶端 `userOrderController` 的 Bean 名衝突。
+
+#### 業務規則重點
+
+- **用戶取消**（`userCancelById`）：僅 `待付款/待接單`（status ≤ 2）可直接取消；`待接單` 已付需
+  呼叫 `weChatPayUtil.refund()` 退款並把 `payStatus` 改為 `REFUND`；狀態轉 `CANCELLED`，寫入
+  取消原因「用戶取消」與取消時間。
+- **再來一單**（`repetition`）：依訂單 id 撈 `order_detail`，`BeanUtils.copyProperties(x, sc, "id")`
+  轉回 `ShoppingCart`（排除主鍵）、補 `userId` 與 `createTime`，再 `insertBatch` 批量寫回購物車。
+- **訂單搜尋**（`conditionSearch`）：`PageHelper` 分頁後，額外把每筆訂單的明細拼成
+  `宮保雞丁*3;` 字串塞進 `OrderVO.orderDishes`，供列表頁展示。
+- **接單/派送/完成**：本質是狀態機推進，`delivery` 僅接受 `CONFIRMED(3)`、`complete` 僅接受
+  `DELIVERY_IN_PROGRESS(4)`，狀態不符拋 `ORDER_STATUS_ERROR`。
+- **拒單/商家取消**：若 `payStatus == PAID` 先退款再改 `CANCELLED`，並記錄拒單/取消原因。
+
+#### 程式碼鏈路（歷史訂單為例）
+
+```
+GET /user/order/historyOrders?page=1&pageSize=10&status=
+  │
+  ▼ OrderController.page → orderService.pageQuery4User
+① PageHelper.startPage(page, pageSize)
+② 組 OrdersPageQueryDTO：userId = BaseContext.getCurrentId()、status
+③ orderMapper.pageQuery(dto)          → OrderMapper.xml 動態 SQL，order_time desc
+④ 遍歷每筆 Orders：
+       orderDetailMapper.getByOrderId(id) 撈明細
+       BeanUtils.copyProperties → OrderVO.setOrderDetailList
+⑤ return PageResult(total, List<OrderVO>)
+```
+
+新增的持久層方法：`OrderMapper.pageQuery / getById / countStatus`（後兩者為 `@Select` 註解）、
+`OrderMapper.xml` 的 `<select id="pageQuery">`、`OrderDetailMapper.getByOrderId`、
+`ShoppingCartMapper.insertBatch`（＋ `ShoppingCartMapper.xml` 的 `<insert id="insertBatch">`）。
+
+#### 已知限制 / 待補（誠實標註）
+
+- **用戶端仍無 JWT 攔截器**：`/user/**` 尚未註冊攔截器（僅 `/admin/**` 有），`historyOrders` /
+  `orderDetail` / `cancel` / `repetition` 依賴的 `BaseContext.getCurrentId()` 取不到 `userId`，
+  與購物車同屬待補此項才能真正跑通（見第七節）。
+- **退款不可實跑**：`userCancelById` / `rejection` / `cancel` 呼叫的 `weChatPayUtil.refund()`
+  與微信支付同樣缺商戶資質，金額亦寫死 `0.01`。
+- **`cancel` 未判空**：商家取消 `getById` 查不到訂單時 `getPayStatus()` 會 NPE（拒單有判空、取消無）。
+
+---
+
+### 5.10 配送範圍校驗（百度地圖）
+
+下單前校驗收貨地址與店鋪的**駕車距離**是否超過 5km，超出則拒絕下單。已接入
+`OrderServiceImpl.submitOrder`（地址判空之後、寫訂單之前）。
+
+#### 呼叫鏈（`checkOutOfRange`，三次 HTTP）
+
+```
+① geocoding/v3(address = 店鋪地址)  → 解析店鋪經緯度  shopLngLat
+② geocoding/v3(address = 收貨地址)  → 解析用戶經緯度  userLngLat
+③ directionlite/v1/driving(origin=店鋪, destination=用戶)
+       → result.routes[0].distance（公尺）
+   distance > 5000 → 拋 OrderBusinessException("超出配送范围")
+   任一步 status != "0" → 拋「店铺地址解析失败 / 收货地址解析失败 / 配送路线规划失败」
+```
+
+透過 `HttpClientUtil.doGet` 呼叫百度 Web 服務 API，回應以 fastjson `JSONObject/JSONArray` 解析。
+
+#### 配置欄位
+
+| YAML key | 注入欄位 | 說明 |
+|---|---|---|
+| `sky.shop.address` | `@Value shopAddress` | 外賣商家店鋪地址（校驗起點） |
+| `sky.baidu.ak` | `@Value ak` | 百度地圖開放平台 AK |
+
+> ⚠️ **AK 為空時無法下單**：`application-dev.yml` 的 `sky.baidu.ak` 留空佔位，因 `checkOutOfRange`
+> 已接入 `submitOrder`，AK 未填時第一次 `geocoding` 即回非 `0` 狀態 → 拋「店铺地址解析失败」，
+> 導致下單中斷。練習環境若無 AK，需自行申請填入，或暫時註解掉 `submitOrder` 內的
+> `checkOutOfRange(...)` 呼叫。
+
+---
+
 ## 六、數據流轉模型 (DTO / Entity / VO)
 
 ```
@@ -1313,6 +1434,10 @@ DishServiceImpl.getByIdWithFlavor():
 | 購物車 | User (C端) | 添加（已存在則 +1）、查看列表、清空、刪減單品（`sub`，-1，減到 0 刪行，與 add 對稱） | 部分（依賴用戶端攔截器） |
 | 地址管理 | User (C端) | 收貨地址新增、列表、按 ID 查詢、修改、刪除、設為預設、查詢預設地址 | Done |
 | 微信支付 | User (C端) | 下單支付（JSAPI 統一下單 + 二次簽名）、支付成功回調（解密 → 改訂單狀態） | 程式碼完成（無商戶資質，無法實跑；金額寫死 0.01、缺來單提醒/冪等/驗簽） |
+| 訂單下單 | User (C端) | `submitOrder`：地址/購物車校驗 → 寫 `orders` + 批量 `order_detail` → 清空購物車（`@Transactional`） | Done |
+| 歷史訂單 | User (C端) | 分頁查詢（可按狀態）、訂單詳情、取消訂單（待接單退款）、再來一單（回灌購物車） | 程式碼完成（依賴用戶端攔截器補齊 `userId`；退款無法實跑） |
+| 訂單管理 | Admin | 訂單搜尋、各狀態統計、詳情、接單、拒單、商家取消、派送、完成（狀態機推進 + 退款位） | 程式碼完成（退款無法實跑；商家取消未判空） |
+| 配送範圍校驗 | User (C端) | 下單前經百度地圖 geocoding + 路線規劃校驗店鋪↔收貨距離 ≤ 5km | 程式碼完成（需真實 AK；AK 空值會中斷下單） |
 | 套餐列表快取 | User / Admin | Spring Cache `@Cacheable` + `@CacheEvict`，key = `setmealCache::{categoryId}` | Done |
 | 橫切功能 | — | JWT 認證(Admin)、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
 
@@ -1320,9 +1445,8 @@ DishServiceImpl.getByIdWithFlavor():
 
 | 模組 | 功能 | 說明 |
 |---|---|---|
-| 用戶端 JWT 攔截器 | `JwtTokenUserInterceptor` | 微信登入已完成；尚缺攔截器校驗 `/user/**` 的 user token 並把 `userId` 寫入 `BaseContext`。**購物車各接口（增/刪/查）已實作但取不到 `userId`，必須先補此項才能跑通** |
-| 訂單下單 | `POST /user/order/submit` | **進行中**：Controller / Service / Mapper 已搭好骨架，但 `submitOrder` 尚有缺陷待修——明細迴圈遍歷了空集合（應遍歷購物車 `list`）、`OrderMapper.xml` 屬性名 `#{paystatus}` 拼錯（應為 `#{payStatus}`）、`order_detail` 漏插 `number`、缺 `@Transactional`。修正前無法跑通 |
-| 訂單流轉 | 催單、接單/拒單、派送、狀態查詢、歷史訂單 | 未開始（**支付**程式碼已完成，見已完成表）；下單跑通後接續 |
+| 用戶端 JWT 攔截器 | `JwtTokenUserInterceptor` | 微信登入已完成；尚缺攔截器校驗 `/user/**` 的 user token 並把 `userId` 寫入 `BaseContext`。**購物車、歷史訂單、取消、再來一單各接口已實作但取不到 `userId`，必須先補此項才能跑通** |
+| 百度地圖 AK | `sky.baidu.ak` | 配送範圍校驗程式碼已完成，但 AK 留空佔位；未填時 `checkOutOfRange` 會中斷下單，需申請真實 AK |
 | 數據統計 | 營業額、訂單、用戶、銷量 Top10 | VO 已定義 (`TurnoverReportVO` 等) |
 | WebSocket | 來單提醒、催單 | 未開始；支付回調 `paySuccess` 已預留「來單提醒」位置但尚未推送 |
 
@@ -1351,5 +1475,10 @@ DishServiceImpl.getByIdWithFlavor():
 1. 建立 MySQL 資料庫 `sky_take_out` 並匯入建表 SQL
 2. 啟動本機 Redis (預設 `localhost:6379`，使用 DB 0)
 3. 修改 `sky-server/src/main/resources/application-dev.yml` 中的資料庫 / Redis 連線資訊
-4. 啟動 `SkyApplication.java` (需 JDK 17)
-5. 訪問 Swagger 文檔：`http://localhost:8080/doc.html`
+4. （選配）於 `application-dev.yml` 填入 `sky.baidu.ak`（百度地圖 AK）；**留空時 `/user/order/submit`
+   下單會因配送範圍校驗失敗而中斷**，練習環境可暫時註解 `OrderServiceImpl.submitOrder` 內的
+   `checkOutOfRange(...)` 呼叫
+5. 啟動 `SkyApplication.java` (**須用 JDK 17**；Lombok 1.18.30 無法在過新的 JDK（實測 JDK 25）
+   上跑注解處理器，會出現大量 `@Data`/`@Slf4j`「找不到符號」編譯錯誤。可 `export JAVA_HOME` 指向
+   JDK 17 後再 `mvn clean compile`)
+6. 訪問 Swagger 文檔：`http://localhost:8080/doc.html`

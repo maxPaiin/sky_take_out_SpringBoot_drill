@@ -63,3 +63,10 @@ sky:
   wechat:
     appid: ${sky.wechat.appid}
     secret: ${sky.wechat.secret}
+
+  #外賣商家店鋪地址(用於校驗收貨地址是否超出配送範圍)
+  shop:
+    address: ${sky.shop.address}
+  #百度地圖開放平台的AK
+  baidu:
+    ak: ${sky.baidu.ak}
