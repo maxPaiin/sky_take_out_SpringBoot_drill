@@ -3,7 +3,6 @@ package com.sky.task;
 /**
  * 定時任務類
  */
-
 import com.sky.entity.Orders;
 import com.sky.mapper.OrderMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -29,12 +28,12 @@ public class OrderTask {
     public void processTimeOrder() {
         log.info("process time order{}", LocalDateTime.now());
         List<Orders> byStatusAndOrderTimeLT = orderMapper.getByStatusAndOrderTimeLT(Orders.PENDING_PAYMENT, LocalDateTime.now().plusMinutes(-15));
-        if (byStatusAndOrderTimeLT.isEmpty()) {
+        if (byStatusAndOrderTimeLT != null && !byStatusAndOrderTimeLT.isEmpty()) {
             for (Orders orders : byStatusAndOrderTimeLT) {
                 orders.setStatus(Orders.CANCELLED);
                 orders.setCancelReason("訂單超時");
                 orders.setCancelTime(LocalDateTime.now());
-                orderMapper.insert(orders);
+                orderMapper.update(orders);
             }
         }
     }
@@ -45,11 +44,12 @@ public class OrderTask {
     @Scheduled(cron = "0 0 1 * * ?") //每日凌晨1點觸發一次
     public void processTimeOrder2() {
         log.info("process time order{}", LocalDateTime.now());
-        List<Orders> byStatusAndOrderTimeLT = orderMapper.getByStatusAndOrderTimeLT(Orders.DELIVERY_IN_PROGRESS, LocalDateTime.now().plusMinutes(-61));
-        if (byStatusAndOrderTimeLT.isEmpty()) {
+        List<Orders> byStatusAndOrderTimeLT = orderMapper.getByStatusAndOrderTimeLT(Orders.DELIVERY_IN_PROGRESS,
+                LocalDateTime.now().plusMinutes(-61));
+        if (byStatusAndOrderTimeLT != null && !byStatusAndOrderTimeLT.isEmpty()) {
             for (Orders orders : byStatusAndOrderTimeLT) {
                 orders.setStatus(Orders.COMPLETED);
-                orderMapper.insert(orders);
+                orderMapper.update(orders);
             }
         }
     }

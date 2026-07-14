@@ -1065,6 +1065,53 @@ GET /user/order/historyOrders?page=1&pageSize=10&status=
 
 ---
 
+### 5.11 WebSocket 來單提醒
+
+支付成功後，後端主動向管理端瀏覽器推送「來單提醒」，無需前端輪詢。基於 Java WebSocket
+（`javax.websocket`，Spring Boot 2.x）實作。
+
+#### 組成
+
+| 類別 | 職責 |
+|---|---|
+| `WebSocketConfiguration` | 註冊 `ServerEndpointExporter` Bean，使 `@ServerEndpoint` 端點在內嵌 Tomcat 生效 |
+| `WebSocketServer` | `@ServerEndpoint("/ws/{sid}")` 端點；以 `Map<String, Session>` 保存連線，提供 `sendToAllClient` 群發 |
+
+#### 推送鏈路
+
+```
+微信支付回調 → PayNotifyController.paySuccessNotify
+             → OrderServiceImpl.paySuccess(outTradeNo)
+                 ├─ orderMapper.update(...)  改訂單狀態為「待接單」
+                 └─ webSocketServer.sendToAllClient(JSON)
+                        │
+                        ▼  管理端瀏覽器 ws 連線收到
+        { "type": 1, "orderId": <訂單id>, "content": "訂單號：xxx" }
+```
+
+- `type = 1` 表示來單提醒（保留 `type = 2` 給客戶催單，尚未實作）。
+- 推送 payload 的 key 為 `orderId`（管理端前端以此欄位定位訂單）。
+
+> ⚠️ 因微信支付無商戶資質無法實跑，`paySuccess` 不會被真實觸發，推送鏈路目前僅在程式碼層面完成。
+
+---
+
+### 5.12 定時任務（訂單狀態自動處理）
+
+`OrderTask` 以 Spring `@Scheduled` cron 表達式定期掃描訂單，自動推進異常狀態。啟動類
+`SkyApplication` 需標註 `@EnableScheduling`。
+
+| 方法 | cron | 處理對象 | 動作 |
+|---|---|---|---|
+| `processTimeOrder` | `0 * * * * ?`（每分鐘） | 待付款且下單超過 15 分鐘 | 置為「已取消」，記錄取消原因/時間 |
+| `processTimeOrder2` | `0 0 1 * * ?`（每日凌晨 1 點） | 派送中且下單超過 1 小時 | 置為「已完成」 |
+
+兩者共用查詢 `OrderMapper.getByStatusAndOrderTimeLT(status, orderTime)`
+（`select * from orders where status = #{status} and order_time < #{orderTime}`），
+命中後逐筆呼叫 `orderMapper.update(orders)` 回寫狀態。
+
+---
+
 ## 六、數據流轉模型 (DTO / Entity / VO)
 
 ```
@@ -1433,12 +1480,14 @@ DishServiceImpl.getByIdWithFlavor():
 | 套餐瀏覽 | User (C端) | 按分類 ID 查詢起售套餐；按套餐 ID 查詢套餐菜品詳情 | Done |
 | 購物車 | User (C端) | 添加（已存在則 +1）、查看列表、清空、刪減單品（`sub`，-1，減到 0 刪行，與 add 對稱） | 部分（依賴用戶端攔截器） |
 | 地址管理 | User (C端) | 收貨地址新增、列表、按 ID 查詢、修改、刪除、設為預設、查詢預設地址 | Done |
-| 微信支付 | User (C端) | 下單支付（JSAPI 統一下單 + 二次簽名）、支付成功回調（解密 → 改訂單狀態） | 程式碼完成（無商戶資質，無法實跑；金額寫死 0.01、缺來單提醒/冪等/驗簽） |
+| 微信支付 | User (C端) | 下單支付（JSAPI 統一下單 + 二次簽名）、支付成功回調（解密 → 改訂單狀態 → WebSocket 來單提醒） | 程式碼完成（無商戶資質，無法實跑；金額寫死 0.01、缺冪等/驗簽） |
 | 訂單下單 | User (C端) | `submitOrder`：地址/購物車校驗 → 寫 `orders` + 批量 `order_detail` → 清空購物車（`@Transactional`） | Done |
 | 歷史訂單 | User (C端) | 分頁查詢（可按狀態）、訂單詳情、取消訂單（待接單退款）、再來一單（回灌購物車） | 程式碼完成（依賴用戶端攔截器補齊 `userId`；退款無法實跑） |
 | 訂單管理 | Admin | 訂單搜尋、各狀態統計、詳情、接單、拒單、商家取消、派送、完成（狀態機推進 + 退款位） | 程式碼完成（退款無法實跑；商家取消未判空） |
 | 配送範圍校驗 | User (C端) | 下單前經百度地圖 geocoding + 路線規劃校驗店鋪↔收貨距離 ≤ 5km | 程式碼完成（需真實 AK；AK 空值會中斷下單） |
 | 套餐列表快取 | User / Admin | Spring Cache `@Cacheable` + `@CacheEvict`，key = `setmealCache::{categoryId}` | Done |
+| WebSocket 來單提醒 | Admin | `paySuccess` 後經 `/ws/{sid}` 向管理端群發來單提醒（`type=1`, `orderId`, `content`） | 程式碼完成（依賴支付回調，無法實跑） |
+| 訂單定時處理 | — | `@Scheduled` 定時掃描：待付款超時自動取消（每分鐘）、派送中超時自動完成（每日凌晨 1 點） | Done |
 | 橫切功能 | — | JWT 認證(Admin)、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
 
 ### 待開發
@@ -1448,7 +1497,7 @@ DishServiceImpl.getByIdWithFlavor():
 | 用戶端 JWT 攔截器 | `JwtTokenUserInterceptor` | 微信登入已完成；尚缺攔截器校驗 `/user/**` 的 user token 並把 `userId` 寫入 `BaseContext`。**購物車、歷史訂單、取消、再來一單各接口已實作但取不到 `userId`，必須先補此項才能跑通** |
 | 百度地圖 AK | `sky.baidu.ak` | 配送範圍校驗程式碼已完成，但 AK 留空佔位；未填時 `checkOutOfRange` 會中斷下單，需申請真實 AK |
 | 數據統計 | 營業額、訂單、用戶、銷量 Top10 | VO 已定義 (`TurnoverReportVO` 等) |
-| WebSocket | 來單提醒、催單 | 未開始；支付回調 `paySuccess` 已預留「來單提醒」位置但尚未推送 |
+| WebSocket 催單 | 客戶催單（`type=2`） | 來單提醒（`type=1`）已完成；客戶端「催單」推送尚未實作 |
 
 ---
 
