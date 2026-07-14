@@ -29,6 +29,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
+
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -66,10 +67,11 @@ public class OrderServiceImpl implements OrderService {
     private UserMapper userMapper;
 
     @Autowired
-    private WebSocketServer  webSocketServer;
+    private WebSocketServer webSocketServer;
 
     /**
      * 用戶下單的方法
+     *
      * @param ordersSubmitDTO
      * @return
      */
@@ -135,12 +137,9 @@ public class OrderServiceImpl implements OrderService {
     }
 
     /**
-
      * 订单支付
      *
-
      * @param ordersPaymentDTO
-
      * @return
      */
     public OrderPaymentVO payment(OrdersPaymentDTO ordersPaymentDTO) throws Exception {
@@ -167,10 +166,8 @@ public class OrderServiceImpl implements OrderService {
     }
 
     /**
-
      * 支付成功，修改订单状态
      *
-
      * @param outTradeNo
      */
     public void paySuccess(String outTradeNo) {
@@ -593,4 +590,22 @@ public class OrderServiceImpl implements OrderService {
         }
     }
 
+    @Override
+    public void reminder(Long id) {
+        // 根据id查询订单
+        Orders ordersDB = orderMapper.getById(id);
+
+        // 校验订单是否存在
+        if (ordersDB == null) {
+            throw new OrderBusinessException(MessageConstant.ORDER_STATUS_ERROR);
+        }
+
+        //用websocket向客户端浏览器推送消息 type:2表示催单提醒 orderId:订单id content:提示内容
+        Map map = new HashMap<>();
+        map.put("type", 2);
+        map.put("orderId", ordersDB.getId());
+        map.put("content", "訂單號：" + ordersDB.getNumber());
+
+        webSocketServer.sendToAllClient(JSON.toJSONString(map));
+    }
 }

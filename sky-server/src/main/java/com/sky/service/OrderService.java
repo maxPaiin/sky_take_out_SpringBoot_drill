@@ -103,4 +103,7 @@ OrderSubmitVO submitOrder(OrdersSubmitDTO ordersSubmitDTO);
      */
     void complete(Long id);
 
+
+    //客戶催單
+    void reminder(Long id);
 }

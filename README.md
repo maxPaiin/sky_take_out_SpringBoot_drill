@@ -129,7 +129,7 @@ sky-take-out (父工程 pom)
 | `user.SetmealController` | `/user/setmeal` | 按分類 ID 查詢起售套餐；按套餐 ID 查詢套餐包含的菜品詳情 |
 | `user.ShoppingCartController` | `/user/shoppingCart` | 添加商品（菜品/套餐，已存在則 +1）、查看列表、清空、刪減單品（數量 -1，減到 0 刪行）|
 | `user.AddressBookController` | `/user/addressBook` | 新增地址、列表查詢、按 ID 查詢、修改、刪除、設為預設、查詢預設地址 |
-| `user.OrderController` | `/user/order` | 用戶下單（提交訂單，校驗地址/購物車 → 寫入 orders + order_detail → 清空購物車）、訂單支付（呼叫微信支付生成預支付交易單） |
+| `user.OrderController` | `/user/order` | 用戶下單（提交訂單，校驗地址/購物車 → 寫入 orders + order_detail → 清空購物車）、訂單支付（呼叫微信支付生成預支付交易單）、客戶催單（向商家端 WebSocket 推送 `type=2` 提醒） |
 | `nofity.PayNotifyController` | `/notify` | 微信支付成功回調（解密報文 → 修改訂單狀態）— 不經 JWT 攔截器，由微信伺服器直接回呼 |
 
 > 同名 Controller 衝突規避：`OrderController` 亦在 admin / user 端各有一份，
@@ -978,6 +978,7 @@ ShoppingCartServiceImpl.subShoppingCart(dto)
 | User | `GET` | `/user/order/orderDetail/{id}` | 訂單詳情（含明細） | `details` |
 | User | `PUT` | `/user/order/cancel/{id}` | 用戶取消訂單（待接單需退款） | `userCancelById` |
 | User | `POST` | `/user/order/repetition/{id}` | 再來一單（明細回灌購物車） | `repetition` |
+| User | `GET` | `/user/order/reminder/{id}` | 客戶催單（WebSocket 推送商家端 `type=2`） | `reminder` |
 | Admin | `GET` | `/admin/order/conditionSearch` | 訂單搜尋（號碼/手機/狀態/時間） | `conditionSearch` |
 | Admin | `GET` | `/admin/order/statistics` | 各狀態訂單數量統計 | `statistics` |
 | Admin | `GET` | `/admin/order/details/{id}` | 訂單詳情 | `details` |
@@ -1089,10 +1090,29 @@ GET /user/order/historyOrders?page=1&pageSize=10&status=
         { "type": 1, "orderId": <訂單id>, "content": "訂單號：xxx" }
 ```
 
-- `type = 1` 表示來單提醒（保留 `type = 2` 給客戶催單，尚未實作）。
+- `type = 1` 表示來單提醒，`type = 2` 表示客戶催單（見下）。
 - 推送 payload 的 key 為 `orderId`（管理端前端以此欄位定位訂單）。
 
-> ⚠️ 因微信支付無商戶資質無法實跑，`paySuccess` 不會被真實觸發，推送鏈路目前僅在程式碼層面完成。
+> ⚠️ 因微信支付無商戶資質無法實跑，`paySuccess` 不會被真實觸發，來單提醒（`type=1`）推送鏈路目前僅在程式碼層面完成。
+
+#### 客戶催單（`type = 2`）
+
+用戶在歷史訂單頁點「催單」時，後端同樣透過 WebSocket 主動向商家端瀏覽器群發提醒，
+與來單提醒共用同一條 `sendToAllClient` 通道，僅以 `type` 區分訊息類型。與來單提醒不同的是，
+催單由**用戶主動觸發**（走 JWT 攔截器的 `/user/**` 路由），不依賴微信支付回調，因此可實跑。
+
+```
+GET /user/order/reminder/{id}
+  │
+  ▼ OrderController.reminder → orderService.reminder(id)
+① ordersDB = orderMapper.getById(id)          按 id 查訂單
+② ordersDB == null → 拋 OrderBusinessException(ORDER_STATUS_ERROR)   訂單不存在校驗
+③ 組裝 payload：{ type:2, orderId:訂單id, content:"訂單號：<number>" }
+④ webSocketServer.sendToAllClient(JSON.toJSONString(map))   群發商家端
+```
+
+> 催單 payload 的 `content` 帶的是訂單號 `number`（商家可讀），而 `orderId` 帶的是主鍵 `id`
+> （前端定位用），兩者不同欄位不要混淆。
 
 ---
 
@@ -1487,6 +1507,7 @@ DishServiceImpl.getByIdWithFlavor():
 | 配送範圍校驗 | User (C端) | 下單前經百度地圖 geocoding + 路線規劃校驗店鋪↔收貨距離 ≤ 5km | 程式碼完成（需真實 AK；AK 空值會中斷下單） |
 | 套餐列表快取 | User / Admin | Spring Cache `@Cacheable` + `@CacheEvict`，key = `setmealCache::{categoryId}` | Done |
 | WebSocket 來單提醒 | Admin | `paySuccess` 後經 `/ws/{sid}` 向管理端群發來單提醒（`type=1`, `orderId`, `content`） | 程式碼完成（依賴支付回調，無法實跑） |
+| WebSocket 客戶催單 | User → Admin | `GET /user/order/reminder/{id}` 由用戶主動觸發，向管理端群發催單提醒（`type=2`, `orderId`, `content`=訂單號） | 程式碼完成（依賴用戶端攔截器補齊 `userId`；催單本身可實跑） |
 | 訂單定時處理 | — | `@Scheduled` 定時掃描：待付款超時自動取消（每分鐘）、派送中超時自動完成（每日凌晨 1 點） | Done |
 | 橫切功能 | — | JWT 認證(Admin)、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
 
@@ -1497,7 +1518,6 @@ DishServiceImpl.getByIdWithFlavor():
 | 用戶端 JWT 攔截器 | `JwtTokenUserInterceptor` | 微信登入已完成；尚缺攔截器校驗 `/user/**` 的 user token 並把 `userId` 寫入 `BaseContext`。**購物車、歷史訂單、取消、再來一單各接口已實作但取不到 `userId`，必須先補此項才能跑通** |
 | 百度地圖 AK | `sky.baidu.ak` | 配送範圍校驗程式碼已完成，但 AK 留空佔位；未填時 `checkOutOfRange` 會中斷下單，需申請真實 AK |
 | 數據統計 | 營業額、訂單、用戶、銷量 Top10 | VO 已定義 (`TurnoverReportVO` 等) |
-| WebSocket 催單 | 客戶催單（`type=2`） | 來單提醒（`type=1`）已完成；客戶端「催單」推送尚未實作 |
 
 ---
 
