@@ -131,6 +131,7 @@ sky-take-out (父工程 pom)
 | `user.AddressBookController` | `/user/addressBook` | 新增地址、列表查詢、按 ID 查詢、修改、刪除、設為預設、查詢預設地址 |
 | `user.OrderController` | `/user/order` | 用戶下單（提交訂單，校驗地址/購物車 → 寫入 orders + order_detail → 清空購物車）、訂單支付（呼叫微信支付生成預支付交易單）、客戶催單（向商家端 WebSocket 推送 `type=2` 提醒） |
 | `nofity.PayNotifyController` | `/notify` | 微信支付成功回調（解密報文 → 修改訂單狀態）— 不經 JWT 攔截器，由微信伺服器直接回呼 |
+| `admin.ReportController` | `/admin/report` | 營業額統計（按日期區間，僅計已完成訂單） |
 
 > 同名 Controller 衝突規避：`OrderController` 亦在 admin / user 端各有一份，
 > 以 `@RestController("userOrderController")` 顯式命名避免衝突。其餘
@@ -204,7 +205,7 @@ sky-take-out (父工程 pom)
 | `SetmealDishMapper` | setmeal_dish | 註解 + XML | insertBatch(XML), deleteBySetmealId, getBySetmealId, getDishIdsByDishIds(XML), getSetmealIdsByDishIds(XML) |
 | `ShoppingCartMapper` | shopping_cart | 註解 + XML | list(XML動態條件), updateNumberById(註解), insert(註解), deleteByUserId(註解), deleteById(註解) |
 | `AddressBookMapper` | address_book | 註解 | insert, list(動態條件), getById, update, updateIsDefaultByUserId, deleteById |
-| `OrderMapper` | orders | XML | insert(XML, useGeneratedKeys 回填主鍵) |
+| `OrderMapper` | orders | 註解 + XML | insert(XML, useGeneratedKeys 回填主鍵), pageQuery(XML), update(XML動態), getByNumber/getById/countStatus(註解), getByStatusAndOrderTimeLT(註解), sumByMap(XML動態統計營業額) |
 | `OrderDetailMapper` | order_detail | XML | insertBatch(XML foreach 批量插入) |
 
 ---
@@ -1132,6 +1133,71 @@ GET /user/order/reminder/{id}
 
 ---
 
+### 5.13 數據統計 — 營業額統計
+
+管理端工作台的第一個統計報表：給定日期區間 `[begin, end]`，回傳**每一天**「已完成」訂單的
+營業額（`amount` 合計），前端據此繪製折線圖。營業額只計 `status = COMPLETED(5)` 的訂單。
+
+#### 接口一覽
+
+| 方法 | 路徑 | 功能 | 入參 |
+|---|---|---|---|
+| `GET` | `/admin/report/turnoverStatistics` | 營業額統計（日粒度） | `begin` / `end`（`yyyy-MM-dd`） |
+
+#### 程式碼鏈路
+
+```
+GET /admin/report/turnoverStatistics?begin=2022-05-01&end=2022-05-31
+  │
+  ▼ ReportController.turnoverStatistics(begin, end)   ← @DateTimeFormat("yyyy-MM-dd")
+① reportService.getTurnoverReport(begin, end)
+② 從 begin 逐日 +1 生成 dateList（含 begin 與 end）
+③ 遍歷每一天 date：
+       beginTime = date 00:00:00 (LocalTime.MIN)
+       endTime   = date 23:59:59.999999999 (LocalTime.MAX)
+       map = { beginTime, endTime, status: COMPLETED(5) }
+       turnover = orderMapper.sumByMap(map)      ← null 視為 0.0
+④ 以逗號拼接 dateList / turnoverList → TurnoverReportVO
+```
+
+```xml
+<!-- OrderMapper.xml — 動態條件統計某日營業額 -->
+<select id="sumByMap" resultType="Double">
+    select sum(amount) from orders
+    <where>
+        <if test="beginTime != null"> and order_time &gt;= #{beginTime} </if>
+        <if test="endTime   != null"> and order_time &lt;= #{endTime}   </if>
+        <if test="status    != null"> and status = #{status}            </if>
+    </where>
+</select>
+```
+
+> 回傳 VO 為兩條逗號分隔字串：`dateList = "2022-05-01,2022-05-02,..."`、
+> `turnoverList = "406.0,1520.0,..."`，兩者長度必相等、按 index 對齊。
+> 某天無已完成訂單時 `sum(amount)` 為 `null`，Service 兜底成 `0.0`，折線圖不會斷點。
+
+#### 除錯紀錄（本次修復的兩個 Bug）
+
+實作初版存在兩個會讓報表「靜默出錯」的問題，均已修正：
+
+1. **`sumByMap` 參數名不匹配（主 Bug）**：`ReportServiceImpl` 放入 map 的鍵是
+   `beginTime` / `endTime`，但 `OrderMapper.xml` 的 `<if>` 卻測 `begin` / `end`。
+   兩者對不上 → 日期條件**永遠不生效**，每天的 SQL 退化成
+   `select sum(amount) from orders where status = 5`（**全時段**已完成訂單總額），
+   導致 `turnoverList` 每一天都是同一個（錯誤的）總數。
+   **修正**：XML 的 `<if>` / `#{}` 改用 `beginTime` / `endTime`，與 Service 傳入的鍵一致
+   （也與 `pageQuery` 的命名統一）。
+
+2. **Controller 日期格式錯誤**：`begin` / `end` 型別是 `LocalDate`，前端傳
+   `2022-05-01`（純日期），但註解寫成 `@DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss")`
+   要求帶時間 → 綁定時解析拋例外，請求根本進不了方法。
+   **修正**：改為 `@DateTimeFormat(pattern = "yyyy-MM-dd")`。
+
+> 這兩個 Bug 的共同點是「不會報 SQL 語法錯」：Bug 1 的 SQL 合法只是語意錯，Bug 2 則在
+> 參數綁定階段就失敗。前者要靠「每天數字都一樣」的異常現象反推，後者靠 400/500 回應定位。
+
+---
+
 ## 六、數據流轉模型 (DTO / Entity / VO)
 
 ```
@@ -1509,6 +1575,7 @@ DishServiceImpl.getByIdWithFlavor():
 | WebSocket 來單提醒 | Admin | `paySuccess` 後經 `/ws/{sid}` 向管理端群發來單提醒（`type=1`, `orderId`, `content`） | 程式碼完成（依賴支付回調，無法實跑） |
 | WebSocket 客戶催單 | User → Admin | `GET /user/order/reminder/{id}` 由用戶主動觸發，向管理端群發催單提醒（`type=2`, `orderId`, `content`=訂單號） | 程式碼完成（依賴用戶端攔截器補齊 `userId`；催單本身可實跑） |
 | 訂單定時處理 | — | `@Scheduled` 定時掃描：待付款超時自動取消（每分鐘）、派送中超時自動完成（每日凌晨 1 點） | Done |
+| 數據統計 | Admin | 營業額統計（日粒度，`GET /admin/report/turnoverStatistics`，僅計已完成訂單） | Done |
 | 橫切功能 | — | JWT 認證(Admin)、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
 
 ### 待開發
@@ -1517,7 +1584,7 @@ DishServiceImpl.getByIdWithFlavor():
 |---|---|---|
 | 用戶端 JWT 攔截器 | `JwtTokenUserInterceptor` | 微信登入已完成；尚缺攔截器校驗 `/user/**` 的 user token 並把 `userId` 寫入 `BaseContext`。**購物車、歷史訂單、取消、再來一單各接口已實作但取不到 `userId`，必須先補此項才能跑通** |
 | 百度地圖 AK | `sky.baidu.ak` | 配送範圍校驗程式碼已完成，但 AK 留空佔位；未填時 `checkOutOfRange` 會中斷下單，需申請真實 AK |
-| 數據統計 | 營業額、訂單、用戶、銷量 Top10 | VO 已定義 (`TurnoverReportVO` 等) |
+| 數據統計 | 訂單統計、用戶統計、銷量 Top10、營運數據匯出 | 營業額統計已完成（見 5.13）；其餘報表 VO 已定義 (`OrderReportVO`、`UserReportVO`、`SalesTop10ReportVO` 等) |
 
 ---
 
