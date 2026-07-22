@@ -131,7 +131,7 @@ sky-take-out (父工程 pom)
 | `user.AddressBookController` | `/user/addressBook` | 新增地址、列表查詢、按 ID 查詢、修改、刪除、設為預設、查詢預設地址 |
 | `user.OrderController` | `/user/order` | 用戶下單（提交訂單，校驗地址/購物車 → 寫入 orders + order_detail → 清空購物車）、訂單支付（呼叫微信支付生成預支付交易單）、客戶催單（向商家端 WebSocket 推送 `type=2` 提醒） |
 | `nofity.PayNotifyController` | `/notify` | 微信支付成功回調（解密報文 → 修改訂單狀態）— 不經 JWT 攔截器，由微信伺服器直接回呼 |
-| `admin.ReportController` | `/admin/report` | 營業額統計（按日期區間，僅計已完成訂單）、用戶統計（按日期區間，每日新增/累計用戶數） |
+| `admin.ReportController` | `/admin/report` | 營業額統計（按日期區間，僅計已完成訂單）、用戶統計（按日期區間，每日新增/累計用戶數）、訂單統計（按日期區間，每日訂單數/有效訂單數 + 完成率） |
 
 > 同名 Controller 衝突規避：`OrderController` 亦在 admin / user 端各有一份，
 > 以 `@RestController("userOrderController")` 顯式命名避免衝突。其餘
@@ -205,7 +205,7 @@ sky-take-out (父工程 pom)
 | `SetmealDishMapper` | setmeal_dish | 註解 + XML | insertBatch(XML), deleteBySetmealId, getBySetmealId, getDishIdsByDishIds(XML), getSetmealIdsByDishIds(XML) |
 | `ShoppingCartMapper` | shopping_cart | 註解 + XML | list(XML動態條件), updateNumberById(註解), insert(註解), deleteByUserId(註解), deleteById(註解) |
 | `AddressBookMapper` | address_book | 註解 | insert, list(動態條件), getById, update, updateIsDefaultByUserId, deleteById |
-| `OrderMapper` | orders | 註解 + XML | insert(XML, useGeneratedKeys 回填主鍵), pageQuery(XML), update(XML動態), getByNumber/getById/countStatus(註解), getByStatusAndOrderTimeLT(註解), sumByMap(XML動態統計營業額) |
+| `OrderMapper` | orders | 註解 + XML | insert(XML, useGeneratedKeys 回填主鍵), pageQuery(XML), update(XML動態), getByNumber/getById/countStatus(註解), getByStatusAndOrderTimeLT(註解), sumByMap(XML動態統計營業額), countByMap(XML動態統計訂單數) |
 | `OrderDetailMapper` | order_detail | XML | insertBatch(XML foreach 批量插入) |
 
 ---
@@ -1262,6 +1262,81 @@ GET /admin/report/userStatistics?begin=2022-05-01&end=2022-05-31
 > 現象是每日數字雷同）；Bug 2 則比 5.13 更嚴重——不是語意錯而是**真的拋 SQL 語法異常**，
 > 因為 5.13 的 `sumByMap` 一開始就用了 `<where>`，這次的 `countByMap` 卻寫成字面 `where`。
 
+### 5.15 數據統計 — 訂單統計
+
+管理端工作台的第三個統計報表：給定日期區間 `[begin, end]`，回傳**每一天**的
+**訂單總數**與**有效訂單數**（`status = COMPLETED(5)`），以及區間內的**訂單總數**、
+**有效訂單總數**與**訂單完成率**。前端據此繪製雙折線圖並顯示完成率。與 5.13 / 5.14
+走同一套「逐日遍歷 + 動態 SQL 統計」的骨架，差別在於同時回傳「明細序列」與「區間彙總」。
+
+#### 接口一覽
+
+| 方法 | 路徑 | 功能 | 入參 |
+|---|---|---|---|
+| `GET` | `/admin/report/orderStatistics` | 訂單統計（日粒度 + 區間彙總） | `begin` / `end`（`yyyy-MM-dd`） |
+
+#### 程式碼鏈路
+
+```
+GET /admin/report/orderStatistics?begin=2022-05-01&end=2022-05-31
+  │
+  ▼ ReportController.orderStatistics(begin, end)   ← @DateTimeFormat("yyyy-MM-dd")
+① reportService.getOrderStatistics(begin, end)
+② 從 begin 逐日 +1 生成 dateList（含 begin 與 end）
+③ 遍歷每一天 date：
+       beginTime = date 00:00:00 (LocalTime.MIN)
+       endTime   = date 23:59:59.999999999 (LocalTime.MAX)
+       當天訂單總數 totalOrder = getOrderCount(beginTime, endTime, null)
+       當天有效訂單 validOrder = getOrderCount(beginTime, endTime, COMPLETED(5))
+       （getOrderCount 私有方法統一組 map → orderMapper.countByMap）
+④ 區間彙總：orderCountList / validOrderCountList 各自 stream().reduce(Integer::sum)
+       訂單完成率 = 有效訂單總數 / 訂單總數（totalOrderCount==0 時取 0.0，避免除零）
+⑤ 逗號拼接 dateList / orderCountList / validOrderCountList
+       + 三個彙總值 → OrderReportVO
+```
+
+```xml
+<!-- OrderMapper.xml — 動態條件統計某日訂單數量（總數 / 有效共用一條 SQL） -->
+<select id="countByMap" resultType="java.lang.Integer">
+    select count(id) from orders
+    <where>
+        <if test="beginTime != null"> and order_time &gt;= #{beginTime} </if>
+        <if test="endTime   != null"> and order_time &lt;= #{endTime}   </if>
+        <if test="status    != null"> and status = #{status}            </if>
+    </where>
+</select>
+```
+
+> 同一條 `countByMap` 靠傳入的 `status` 是否為 null 兼顧兩種語意：`status = null` →
+> 當天全部訂單（總數）；`status = COMPLETED(5)` → 當天已完成訂單（有效數）。這裡刻意
+> 沿用 5.13 `sumByMap` 的 `beginTime` / `endTime` 命名，讓 map 鍵與 XML `<if>` 一致，
+> **正好避開了 5.13 / 5.14 反覆踩到的「鍵名對不上」陷阱**。
+
+#### 除錯紀錄（本次修復的兩個問題）
+
+不同於 5.13 / 5.14，本次的參數命名與 `<where>` 都寫對了（顯然吸取了前兩個報表的教訓），
+主 Bug 改出現在「數值語意」而非「SQL 條件」上：
+
+1. **訂單完成率重複乘 100（主 Bug）**：初版寫成
+   `orderCompletionRate = (validOrderCount.doubleValue() / totalOrderCount) * 100`。
+   但 `OrderReportVO.orderCompletionRate` 的契約是 **0~1 的小數**，前端拿到後才自行
+   `(rate * 100).toFixed(2) + '%'` 顯示百分比。後端先乘一次 100 → 前端再乘一次 →
+   完成率會顯示成 `8500.00%` 這種離譜數字（**不會報錯，但畫面數值錯得很明顯**）。
+   **修正**：移除 `* 100`，回傳 `validOrderCount.doubleValue() / totalOrderCount`。
+
+2. **除零兜底的字面量型別**：初版三元運算子寫 `totalOrderCount == 0 ? 0 : ...`，
+   左支是 `int` 字面量 `0`、右支是 `double`，靠 Java 三元的數值提升才勉強變成 `Double`。
+   語意雖對，但依賴隱式提升、可讀性差。**修正**：兩支型別對齊為 `0.0`
+   （`totalOrderCount == 0 ? 0.0 : ...`），明確回傳 `Double`。
+
+> 另修一處命名瑕疵：Controller 方法名誤寫為 `uorderStatistics`（多了個 `u`），
+> 已更名為 `orderStatistics`，與 `turnoverStatistics` / `userStatistics` 命名對齊。
+> 此純屬方法識別名，實際路由由 `@GetMapping("/orderStatistics")` 決定，不影響呼叫。
+
+> 對照 5.13 / 5.14：那兩個報表的 Bug 都落在「SQL 條件是否生效」（鍵名不匹配、`where and`
+> 語法錯）；到了訂單統計，SQL 骨架已寫得乾淨無誤，剩下的坑轉移到「Java 端的數值計算與型別」。
+> 這也提醒：報表類功能的正確性同時取決於 **SQL 條件** 與 **回傳值語意契約** 兩端。
+
 ---
 
 ## 六、數據流轉模型 (DTO / Entity / VO)
@@ -1641,7 +1716,7 @@ DishServiceImpl.getByIdWithFlavor():
 | WebSocket 來單提醒 | Admin | `paySuccess` 後經 `/ws/{sid}` 向管理端群發來單提醒（`type=1`, `orderId`, `content`） | 程式碼完成（依賴支付回調，無法實跑） |
 | WebSocket 客戶催單 | User → Admin | `GET /user/order/reminder/{id}` 由用戶主動觸發，向管理端群發催單提醒（`type=2`, `orderId`, `content`=訂單號） | 程式碼完成（依賴用戶端攔截器補齊 `userId`；催單本身可實跑） |
 | 訂單定時處理 | — | `@Scheduled` 定時掃描：待付款超時自動取消（每分鐘）、派送中超時自動完成（每日凌晨 1 點） | Done |
-| 數據統計 | Admin | 營業額統計（日粒度，`GET /admin/report/turnoverStatistics`，僅計已完成訂單）、用戶統計（日粒度，`GET /admin/report/userStatistics`，每日新增/累計用戶） | Done |
+| 數據統計 | Admin | 營業額統計（日粒度，`GET /admin/report/turnoverStatistics`，僅計已完成訂單）、用戶統計（日粒度，`GET /admin/report/userStatistics`，每日新增/累計用戶）、訂單統計（日粒度，`GET /admin/report/orderStatistics`，每日訂單數/有效訂單數 + 區間完成率） | Done |
 | 橫切功能 | — | JWT 認證(Admin)、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
 
 ### 待開發
@@ -1650,7 +1725,7 @@ DishServiceImpl.getByIdWithFlavor():
 |---|---|---|
 | 用戶端 JWT 攔截器 | `JwtTokenUserInterceptor` | 微信登入已完成；尚缺攔截器校驗 `/user/**` 的 user token 並把 `userId` 寫入 `BaseContext`。**購物車、歷史訂單、取消、再來一單各接口已實作但取不到 `userId`，必須先補此項才能跑通** |
 | 百度地圖 AK | `sky.baidu.ak` | 配送範圍校驗程式碼已完成，但 AK 留空佔位；未填時 `checkOutOfRange` 會中斷下單，需申請真實 AK |
-| 數據統計 | 訂單統計、銷量 Top10、營運數據匯出 | 營業額統計（見 5.13）、用戶統計（見 5.14）已完成；其餘報表 VO 已定義 (`OrderReportVO`、`SalesTop10ReportVO` 等) |
+| 數據統計 | 銷量 Top10、營運數據匯出 | 營業額統計（見 5.13）、用戶統計（見 5.14）、訂單統計（見 5.15）已完成；其餘報表 VO 已定義 (`SalesTop10ReportVO` 等) |
 
 ---
 

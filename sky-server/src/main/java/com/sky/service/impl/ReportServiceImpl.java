@@ -4,6 +4,7 @@ import com.sky.entity.Orders;
 import com.sky.mapper.OrderMapper;
 import com.sky.mapper.UserMapper;
 import com.sky.service.ReportService;
+import com.sky.vo.OrderReportVO;
 import com.sky.vo.TurnoverReportVO;
 import com.sky.vo.UserReportVO;
 import lombok.extern.slf4j.Slf4j;
@@ -94,14 +95,62 @@ public class ReportServiceImpl implements ReportService {
             newUserList.add(newUser);
             totalUserList.add(totalUser);
         });
-
-
-
-
         return UserReportVO.builder()
                 .dateList(StringUtils.join(dateList, ","))
                 .newUserList(StringUtils.join(newUserList, ","))
                 .totalUserList(StringUtils.join(totalUserList, ","))
                 .build();
+    }
+    //指定時間內的訂單數據
+    @Override
+    public OrderReportVO getOrderStatistics(LocalDate begin, LocalDate end) {
+        List<LocalDate> dateList = new ArrayList<>();
+        dateList.add(begin);
+
+        while(!begin.equals(end)){
+            begin = begin.plusDays(1);
+            dateList.add(begin);
+        }
+
+        List<Integer> orderCountList = new ArrayList<>();
+        List<Integer> validOrderCountList = new ArrayList<>();
+
+        //每一天的有效訂單數和訂單總數
+        dateList.forEach(date->{
+            LocalDateTime beginTime = LocalDateTime.of(date, LocalTime.MIN); //當天開始時刻
+            LocalDateTime endTime = LocalDateTime.of(date, LocalTime.MAX); //當天結束時刻
+
+            Integer totalOrder = getOrderCount(beginTime, endTime, null); //當天訂單總數
+            Integer validOrder = getOrderCount(beginTime, endTime, Orders.COMPLETED); //當天有效訂單數
+
+            orderCountList.add(totalOrder);
+            validOrderCountList.add(validOrder);
+        });
+
+        //需要計算時間區間內的訂單總數量
+        Integer totalOrderCount = orderCountList.stream().reduce(Integer::sum).get();
+        //計算時間區間內的有效訂單數量
+        Integer validOrderCount = validOrderCountList.stream().reduce(Integer::sum).get();
+
+        //訂單完成率（回傳 0~1 的小數，前端再自行 *100 顯示百分比）
+        Double orderCompletionRate = totalOrderCount == 0 ? 0.0 : validOrderCount.doubleValue() / totalOrderCount;
+
+        return OrderReportVO.builder()
+                .dateList(StringUtils.join(dateList, ","))
+                .orderCountList(StringUtils.join(orderCountList, ","))
+                .validOrderCountList(StringUtils.join(validOrderCountList, ","))
+                .totalOrderCount(totalOrderCount)
+                .validOrderCount(validOrderCount)
+                .orderCompletionRate(orderCompletionRate)
+                .build();
+    }
+
+
+    private Integer getOrderCount(LocalDateTime beginTime, LocalDateTime endTime, Integer status){
+        Map<String , Object> map = new HashMap<>();
+        map.put("beginTime", beginTime);
+        map.put("endTime", endTime);
+        map.put("status", status);
+        return orderMapper.countByMap(map);
     }
 }
