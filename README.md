@@ -131,7 +131,7 @@ sky-take-out (父工程 pom)
 | `user.AddressBookController` | `/user/addressBook` | 新增地址、列表查詢、按 ID 查詢、修改、刪除、設為預設、查詢預設地址 |
 | `user.OrderController` | `/user/order` | 用戶下單（提交訂單，校驗地址/購物車 → 寫入 orders + order_detail → 清空購物車）、訂單支付（呼叫微信支付生成預支付交易單）、客戶催單（向商家端 WebSocket 推送 `type=2` 提醒） |
 | `nofity.PayNotifyController` | `/notify` | 微信支付成功回調（解密報文 → 修改訂單狀態）— 不經 JWT 攔截器，由微信伺服器直接回呼 |
-| `admin.ReportController` | `/admin/report` | 營業額統計（按日期區間，僅計已完成訂單） |
+| `admin.ReportController` | `/admin/report` | 營業額統計（按日期區間，僅計已完成訂單）、用戶統計（按日期區間，每日新增/累計用戶數） |
 
 > 同名 Controller 衝突規避：`OrderController` 亦在 admin / user 端各有一份，
 > 以 `@RestController("userOrderController")` 顯式命名避免衝突。其餘
@@ -1196,6 +1196,72 @@ GET /admin/report/turnoverStatistics?begin=2022-05-01&end=2022-05-31
 > 這兩個 Bug 的共同點是「不會報 SQL 語法錯」：Bug 1 的 SQL 合法只是語意錯，Bug 2 則在
 > 參數綁定階段就失敗。前者要靠「每天數字都一樣」的異常現象反推，後者靠 400/500 回應定位。
 
+### 5.14 數據統計 — 用戶統計
+
+管理端工作台的第二個統計報表：給定日期區間 `[begin, end]`，回傳**每一天**的
+**新增用戶數**與**累計用戶總數**，前端據此繪製雙折線圖。與營業額統計走同一套「逐日遍歷 +
+動態 SQL 統計」的骨架，差別在資料源改為 `user` 表、用 `create_time` 界定新增與累計。
+
+#### 接口一覽
+
+| 方法 | 路徑 | 功能 | 入參 |
+|---|---|---|---|
+| `GET` | `/admin/report/userStatistics` | 用戶統計（日粒度） | `begin` / `end`（`yyyy-MM-dd`） |
+
+#### 程式碼鏈路
+
+```
+GET /admin/report/userStatistics?begin=2022-05-01&end=2022-05-31
+  │
+  ▼ ReportController.userStatistics(begin, end)   ← @DateTimeFormat("yyyy-MM-dd")
+① reportService.getUserStatistics(begin, end)
+② 從 begin 逐日 +1 生成 dateList（含 begin 與 end）
+③ 遍歷每一天 date：
+       beginTime = date 00:00:00 (LocalTime.MIN)
+       endTime   = date 23:59:59.999999999 (LocalTime.MAX)
+       累計用戶 totalUser = countByMap({ end: endTime })
+                           ← create_time <= 當天結束 的所有用戶
+       新增用戶 newUser   = countByMap({ begin: beginTime, end: endTime })
+                           ← create_time 落在當天 00:00 ~ 23:59 之間
+④ 以逗號拼接 dateList / newUserList / totalUserList → UserReportVO
+```
+
+```xml
+<!-- UserMapper.xml — 動態條件統計用戶數量（累計 / 新增共用一條 SQL） -->
+<select id="countByMap" resultType="Integer">
+    select count(id) from user
+    <where>
+        <if test="begin != null"> and create_time &gt;= #{begin} </if>
+        <if test="end   != null"> and create_time &lt;= #{end}   </if>
+    </where>
+</select>
+```
+
+> 同一條 `countByMap` 靠傳入的鍵不同兼顧兩種語意：只帶 `end` → 「當天結束前的所有用戶」＝累計；
+> 同時帶 `begin` + `end` → 「當天內建立的用戶」＝新增。回傳 VO 為三條等長、按 index 對齊的
+> 逗號分隔字串（`dateList` / `newUserList` / `totalUserList`）。
+
+#### 除錯紀錄（本次修復的兩個 Bug）
+
+實作初版同樣存在兩個問題，且與 5.13 的兩個 Bug 是「同一類錯誤的翻版」，均已修正：
+
+1. **`countByMap` 參數名不匹配（主 Bug，同 5.13 Bug 1）**：`ReportServiceImpl` 統計新增用戶時
+   放入 map 的鍵是 `beginTime`，但 `UserMapper.xml` 的 `<if>` 測的是 `begin`、`#{}` 取的也是
+   `begin` → 起始時間條件**永遠不生效**，新增用戶查詢退化成「當天結束前的全部用戶」，
+   於是 `newUserList` 每天都等於 `totalUserList`（新增數恆等於累計數）。
+   **修正**：Service 放入 map 的鍵由 `beginTime` 改為 `begin`，與 XML 一致。
+
+2. **`<where>` 缺失導致 SQL 語法錯**：初版 XML 用字面 `where` 後面直接接 `<if>`，累計用戶查詢
+   只帶 `end`（`begin` 為 null）時，第一個 `<if>` 被跳過、第二個 `<if>` 帶著前導 `and` 拼出
+   `select count(id) from user where and create_time <= ?` → **`where and` 語法錯誤**，
+   累計查詢直接拋 `SQLSyntaxErrorException`，整個請求 500。
+   **修正**：改用 MyBatis `<where>` 標籤（兩個 `<if>` 內統一加前導 `and`），由 `<where>`
+   自動去掉多餘的前導 `and` 並在無任何條件時省略 `WHERE`。
+
+> 對照 5.13：Bug 1 是同一個「map 鍵名與 XML `<if>` 對不上」的陷阱重演（語意靜默出錯，
+> 現象是每日數字雷同）；Bug 2 則比 5.13 更嚴重——不是語意錯而是**真的拋 SQL 語法異常**，
+> 因為 5.13 的 `sumByMap` 一開始就用了 `<where>`，這次的 `countByMap` 卻寫成字面 `where`。
+
 ---
 
 ## 六、數據流轉模型 (DTO / Entity / VO)
@@ -1575,7 +1641,7 @@ DishServiceImpl.getByIdWithFlavor():
 | WebSocket 來單提醒 | Admin | `paySuccess` 後經 `/ws/{sid}` 向管理端群發來單提醒（`type=1`, `orderId`, `content`） | 程式碼完成（依賴支付回調，無法實跑） |
 | WebSocket 客戶催單 | User → Admin | `GET /user/order/reminder/{id}` 由用戶主動觸發，向管理端群發催單提醒（`type=2`, `orderId`, `content`=訂單號） | 程式碼完成（依賴用戶端攔截器補齊 `userId`；催單本身可實跑） |
 | 訂單定時處理 | — | `@Scheduled` 定時掃描：待付款超時自動取消（每分鐘）、派送中超時自動完成（每日凌晨 1 點） | Done |
-| 數據統計 | Admin | 營業額統計（日粒度，`GET /admin/report/turnoverStatistics`，僅計已完成訂單） | Done |
+| 數據統計 | Admin | 營業額統計（日粒度，`GET /admin/report/turnoverStatistics`，僅計已完成訂單）、用戶統計（日粒度，`GET /admin/report/userStatistics`，每日新增/累計用戶） | Done |
 | 橫切功能 | — | JWT 認證(Admin)、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
 
 ### 待開發
@@ -1584,7 +1650,7 @@ DishServiceImpl.getByIdWithFlavor():
 |---|---|---|
 | 用戶端 JWT 攔截器 | `JwtTokenUserInterceptor` | 微信登入已完成；尚缺攔截器校驗 `/user/**` 的 user token 並把 `userId` 寫入 `BaseContext`。**購物車、歷史訂單、取消、再來一單各接口已實作但取不到 `userId`，必須先補此項才能跑通** |
 | 百度地圖 AK | `sky.baidu.ak` | 配送範圍校驗程式碼已完成，但 AK 留空佔位；未填時 `checkOutOfRange` 會中斷下單，需申請真實 AK |
-| 數據統計 | 訂單統計、用戶統計、銷量 Top10、營運數據匯出 | 營業額統計已完成（見 5.13）；其餘報表 VO 已定義 (`OrderReportVO`、`UserReportVO`、`SalesTop10ReportVO` 等) |
+| 數據統計 | 訂單統計、銷量 Top10、營運數據匯出 | 營業額統計（見 5.13）、用戶統計（見 5.14）已完成；其餘報表 VO 已定義 (`OrderReportVO`、`SalesTop10ReportVO` 等) |
 
 ---
 
