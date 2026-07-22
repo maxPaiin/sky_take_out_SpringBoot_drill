@@ -131,7 +131,7 @@ sky-take-out (父工程 pom)
 | `user.AddressBookController` | `/user/addressBook` | 新增地址、列表查詢、按 ID 查詢、修改、刪除、設為預設、查詢預設地址 |
 | `user.OrderController` | `/user/order` | 用戶下單（提交訂單，校驗地址/購物車 → 寫入 orders + order_detail → 清空購物車）、訂單支付（呼叫微信支付生成預支付交易單）、客戶催單（向商家端 WebSocket 推送 `type=2` 提醒） |
 | `nofity.PayNotifyController` | `/notify` | 微信支付成功回調（解密報文 → 修改訂單狀態）— 不經 JWT 攔截器，由微信伺服器直接回呼 |
-| `admin.ReportController` | `/admin/report` | 營業額統計（按日期區間，僅計已完成訂單）、用戶統計（按日期區間，每日新增/累計用戶數）、訂單統計（按日期區間，每日訂單數/有效訂單數 + 完成率） |
+| `admin.ReportController` | `/admin/report` | 營業額統計（按日期區間，僅計已完成訂單）、用戶統計（按日期區間，每日新增/累計用戶數）、訂單統計（按日期區間，每日訂單數/有效訂單數 + 完成率）、銷量 Top10（按日期區間，已完成訂單明細 sum(number) 取前 10） |
 
 > 同名 Controller 衝突規避：`OrderController` 亦在 admin / user 端各有一份，
 > 以 `@RestController("userOrderController")` 顯式命名避免衝突。其餘
@@ -1155,19 +1155,19 @@ GET /admin/report/turnoverStatistics?begin=2022-05-01&end=2022-05-31
 ③ 遍歷每一天 date：
        beginTime = date 00:00:00 (LocalTime.MIN)
        endTime   = date 23:59:59.999999999 (LocalTime.MAX)
-       map = { beginTime, endTime, status: COMPLETED(5) }
+       map = { begin, end, status: COMPLETED(5) }
        turnover = orderMapper.sumByMap(map)      ← null 視為 0.0
 ④ 以逗號拼接 dateList / turnoverList → TurnoverReportVO
 ```
 
 ```xml
-<!-- OrderMapper.xml — 動態條件統計某日營業額 -->
+<!-- OrderMapper.xml — 動態條件統計某日營業額（現行版：begin/end，見 5.16 命名統一） -->
 <select id="sumByMap" resultType="Double">
     select sum(amount) from orders
     <where>
-        <if test="beginTime != null"> and order_time &gt;= #{beginTime} </if>
-        <if test="endTime   != null"> and order_time &lt;= #{endTime}   </if>
-        <if test="status    != null"> and status = #{status}            </if>
+        <if test="begin != null"> and order_time &gt; #{begin} </if>
+        <if test="end   != null"> and order_time &lt; #{end}   </if>
+        <if test="status!= null"> and status = #{status}       </if>
     </where>
 </select>
 ```
@@ -1185,8 +1185,9 @@ GET /admin/report/turnoverStatistics?begin=2022-05-01&end=2022-05-31
    兩者對不上 → 日期條件**永遠不生效**，每天的 SQL 退化成
    `select sum(amount) from orders where status = 5`（**全時段**已完成訂單總額），
    導致 `turnoverList` 每一天都是同一個（錯誤的）總數。
-   **修正**：XML 的 `<if>` / `#{}` 改用 `beginTime` / `endTime`，與 Service 傳入的鍵一致
-   （也與 `pageQuery` 的命名統一）。
+   **修正（當時）**：XML 的 `<if>` / `#{}` 改用 `beginTime` / `endTime`，與 Service 傳入的鍵一致。
+   （後續 5.16 新增銷量 Top10 時，又把 `sumByMap` 參數統一命名為 `begin` / `end` 並同步改動
+   Service 端 map 鍵——上方 XML 片段已是該現行版；此改名一度再次觸發同型 Bug，詳見 5.16 除錯紀錄。）
 
 2. **Controller 日期格式錯誤**：`begin` / `end` 型別是 `LocalDate`，前端傳
    `2022-05-01`（純日期），但註解寫成 `@DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss")`
@@ -1296,21 +1297,23 @@ GET /admin/report/orderStatistics?begin=2022-05-01&end=2022-05-31
 ```
 
 ```xml
-<!-- OrderMapper.xml — 動態條件統計某日訂單數量（總數 / 有效共用一條 SQL） -->
+<!-- OrderMapper.xml — 動態條件統計某日訂單數量（現行版：begin/end，見 5.16 命名統一） -->
 <select id="countByMap" resultType="java.lang.Integer">
     select count(id) from orders
     <where>
-        <if test="beginTime != null"> and order_time &gt;= #{beginTime} </if>
-        <if test="endTime   != null"> and order_time &lt;= #{endTime}   </if>
-        <if test="status    != null"> and status = #{status}            </if>
+        <if test="begin != null"> and order_time &gt; #{begin} </if>
+        <if test="end   != null"> and order_time &lt; #{end}   </if>
+        <if test="status!= null"> and status = #{status}       </if>
     </where>
 </select>
 ```
 
 > 同一條 `countByMap` 靠傳入的 `status` 是否為 null 兼顧兩種語意：`status = null` →
-> 當天全部訂單（總數）；`status = COMPLETED(5)` → 當天已完成訂單（有效數）。這裡刻意
-> 沿用 5.13 `sumByMap` 的 `beginTime` / `endTime` 命名，讓 map 鍵與 XML `<if>` 一致，
-> **正好避開了 5.13 / 5.14 反覆踩到的「鍵名對不上」陷阱**。
+> 當天全部訂單（總數）；`status = COMPLETED(5)` → 當天已完成訂單（有效數）。
+> 本報表當時（與 5.13 一致地）用 `beginTime` / `endTime` 命名，map 鍵與 XML `<if>` 對齊，
+> **一度避開了 5.13 / 5.14 反覆踩到的「鍵名對不上」陷阱**；但 5.16 新增 Top10 時把
+> `countByMap` 參數改名為 `begin` / `end`（上方即現行版），Java 端 map 鍵也已同步更新——
+> 此改名一度再度觸發同型 Bug，詳見 5.16 除錯紀錄。
 
 #### 除錯紀錄（本次修復的兩個問題）
 
@@ -1336,6 +1339,78 @@ GET /admin/report/orderStatistics?begin=2022-05-01&end=2022-05-31
 > 對照 5.13 / 5.14：那兩個報表的 Bug 都落在「SQL 條件是否生效」（鍵名不匹配、`where and`
 > 語法錯）；到了訂單統計，SQL 骨架已寫得乾淨無誤，剩下的坑轉移到「Java 端的數值計算與型別」。
 > 這也提醒：報表類功能的正確性同時取決於 **SQL 條件** 與 **回傳值語意契約** 兩端。
+
+### 5.16 數據統計 — 銷量 Top10 排行
+
+管理端工作台的第四個統計報表：給定日期區間 `[begin, end]`，回傳區間內**銷量前 10 名**的
+商品（菜品 / 套餐）名稱與對應銷量，前端據此繪製橫向柱狀圖。銷量只計 `status = COMPLETED(5)`
+的訂單，並以**訂單明細行**（`order_detail`）為統計顆粒，`sum(number)` 累加同名商品的份數。
+
+#### 接口一覽
+
+| 方法 | 路徑 | 功能 | 入參 |
+|---|---|---|---|
+| `GET` | `/admin/report/top10` | 銷量 Top10 排行（區間彙總） | `begin` / `end`（`yyyy-MM-dd`） |
+
+#### 程式碼鏈路
+
+```
+GET /admin/report/top10?begin=2022-05-01&end=2022-05-31
+  │
+  ▼ ReportController.top10(begin, end)   ← @DateTimeFormat("yyyy-MM-dd")
+① reportService.getSalesTop10Report(begin, end)
+② beginTime = begin 00:00:00 (LocalTime.MIN)；endTime = end 23:59:59.999999999 (LocalTime.MAX)
+③ orderMapper.getSalesTop10(beginTime, endTime)
+       └─ JOIN order_detail × orders，篩 status=5 + 時間區間，
+          group by 商品名 → sum(number) → 降序 → limit 10
+④ stream 抽出 name / number 兩串，逗號拼接 → SalesTop10ReportVO
+       nameList   = "宮保雞丁,魚香肉絲,..."
+       numberList = "260,215,..."
+```
+
+```xml
+<!-- OrderMapper.xml — 區間內銷量前 10 -->
+<select id="getSalesTop10" resultType="com.sky.dto.GoodsSalesDTO">
+    select od.name, sum(od.number) number
+    from order_detail od , orders o
+    where od.order_id = o.id and o.status = 5
+    <if test="begin != null"> and o.order_time &gt; #{begin} </if>
+    <if test="end   != null"> and o.order_time &lt; #{end}   </if>
+    group by od.name
+    order by number desc
+    limit 0,10
+</select>
+```
+
+> `getSalesTop10(LocalDateTime begin, LocalDateTime end)` 是**兩個散參**（非 map），靠
+> Spring Boot 預設開啟的 `-parameters` 編譯旗標保留形參名，MyBatis 才能用 `#{begin}` /
+> `#{end}` 依名綁定（與同檔 `getByStatusAndOrderTimeLT(status, orderTime)` 同套路）。
+
+#### 除錯紀錄（本次修復的一個回歸 Bug）
+
+本次新增 Top10 時，作者順手把共用的 `sumByMap` / `countByMap` 的動態條件參數，從原本
+（5.13 / 5.15 已修正定案的）`beginTime` / `endTime` **改名為 `begin` / `end`**，並把邊界
+運算子由 `>=` / `<=` 改成 `>` / `<`，好與新寫的 `getSalesTop10` 命名一致。**但只改了 XML，
+忘了同步改 Java 端 `ReportServiceImpl` 放入 map 的鍵**——於是 5.13 / 5.14 早已踩過的
+「map 鍵名與 XML `<if>` 對不上」陷阱**原地復活**：
+
+- `getTurnoverReport` 仍 `map.put("beginTime", …)` / `map.put("endTime", …)` → 餵給
+  `sumByMap`，但 XML 現在測 `begin` / `end` → 日期條件靜默失效，**營業額每天都變成全時段總額**。
+- `getOrderCount`（訂單統計用）同理 `map.put("beginTime"/"endTime", …)` → 餵給 `countByMap`
+  → 每天的訂單總數 / 有效數都退化成**全時段計數**。
+
+**修正**：把兩處 map 鍵由 `beginTime` / `endTime` 改為 `begin` / `end`，與改動後的 XML 對齊。
+（`getUserStatistics` 走的是 `userMapper.countByMap`，其 map 鍵本就是 `begin` / `end`，
+且對應的是 `UserMapper.xml` 而非 `OrderMapper.xml`，故不受本次 XML 改名波及。）
+
+> ⚠️ 前三個報表（5.13 / 5.14 / 5.15）文中展示的 XML 片段，是各自「當下修正版」的樣貌
+> （`beginTime` / `endTime` + `>=` / `<=`）。本次 Top10 統一命名後，`OrderMapper.xml` 的
+> `sumByMap` / `countByMap` 現行版已改為 `begin` / `end` + `>` / `<`，Java 端 map 鍵亦已同步。
+> 三個報表的**功能與語意不變**，變的只是參數命名與（可忽略的）邊界包含性。
+
+> **教訓重申**：同一個「散參改名 / map 鍵改名」只要 XML 與 Java 沒同步，就是同一個靜默 Bug 的
+> 第三次重演。共用 mapper 方法（`sumByMap` / `countByMap` 被多個報表共用）改動參數契約時，
+> **務必回頭掃一遍所有呼叫端的 map 鍵**。
 
 ---
 
@@ -1716,7 +1791,7 @@ DishServiceImpl.getByIdWithFlavor():
 | WebSocket 來單提醒 | Admin | `paySuccess` 後經 `/ws/{sid}` 向管理端群發來單提醒（`type=1`, `orderId`, `content`） | 程式碼完成（依賴支付回調，無法實跑） |
 | WebSocket 客戶催單 | User → Admin | `GET /user/order/reminder/{id}` 由用戶主動觸發，向管理端群發催單提醒（`type=2`, `orderId`, `content`=訂單號） | 程式碼完成（依賴用戶端攔截器補齊 `userId`；催單本身可實跑） |
 | 訂單定時處理 | — | `@Scheduled` 定時掃描：待付款超時自動取消（每分鐘）、派送中超時自動完成（每日凌晨 1 點） | Done |
-| 數據統計 | Admin | 營業額統計（日粒度，`GET /admin/report/turnoverStatistics`，僅計已完成訂單）、用戶統計（日粒度，`GET /admin/report/userStatistics`，每日新增/累計用戶）、訂單統計（日粒度，`GET /admin/report/orderStatistics`，每日訂單數/有效訂單數 + 區間完成率） | Done |
+| 數據統計 | Admin | 營業額統計（日粒度，`GET /admin/report/turnoverStatistics`，僅計已完成訂單）、用戶統計（日粒度，`GET /admin/report/userStatistics`，每日新增/累計用戶）、訂單統計（日粒度，`GET /admin/report/orderStatistics`，每日訂單數/有效訂單數 + 區間完成率）、銷量 Top10（`GET /admin/report/top10`，區間內已完成訂單明細 sum(number) 取前 10） | Done |
 | 橫切功能 | — | JWT 認證(Admin)、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
 
 ### 待開發
@@ -1725,7 +1800,7 @@ DishServiceImpl.getByIdWithFlavor():
 |---|---|---|
 | 用戶端 JWT 攔截器 | `JwtTokenUserInterceptor` | 微信登入已完成；尚缺攔截器校驗 `/user/**` 的 user token 並把 `userId` 寫入 `BaseContext`。**購物車、歷史訂單、取消、再來一單各接口已實作但取不到 `userId`，必須先補此項才能跑通** |
 | 百度地圖 AK | `sky.baidu.ak` | 配送範圍校驗程式碼已完成，但 AK 留空佔位；未填時 `checkOutOfRange` 會中斷下單，需申請真實 AK |
-| 數據統計 | 銷量 Top10、營運數據匯出 | 營業額統計（見 5.13）、用戶統計（見 5.14）、訂單統計（見 5.15）已完成；其餘報表 VO 已定義 (`SalesTop10ReportVO` 等) |
+| 數據統計 | 營運數據匯出（Excel） | 營業額統計（見 5.13）、用戶統計（見 5.14）、訂單統計（見 5.15）、銷量 Top10（見 5.16）已完成；尚缺工作台總覽數據匯出報表 |
 
 ---
 
