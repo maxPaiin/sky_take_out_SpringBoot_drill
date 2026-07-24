@@ -132,6 +132,7 @@ sky-take-out (父工程 pom)
 | `user.OrderController` | `/user/order` | 用戶下單（提交訂單，校驗地址/購物車 → 寫入 orders + order_detail → 清空購物車）、訂單支付（呼叫微信支付生成預支付交易單）、客戶催單（向商家端 WebSocket 推送 `type=2` 提醒） |
 | `nofity.PayNotifyController` | `/notify` | 微信支付成功回調（解密報文 → 修改訂單狀態）— 不經 JWT 攔截器，由微信伺服器直接回呼 |
 | `admin.ReportController` | `/admin/report` | 營業額統計（按日期區間，僅計已完成訂單）、用戶統計（按日期區間，每日新增/累計用戶數）、訂單統計（按日期區間，每日訂單數/有效訂單數 + 完成率）、銷量 Top10（按日期區間，已完成訂單明細 sum(number) 取前 10） |
+| `admin.WorkSpaceController` | `/admin/workspace` | 工作台今日營業數據（營業額/有效訂單/完成率/客單價/新增用戶）、訂單管理總覽（待接單/待派送/已完成/已取消/全部）、菜品總覽（起售/停售數）、套餐總覽（起售/停售數） |
 
 > 同名 Controller 衝突規避：`OrderController` 亦在 admin / user 端各有一份，
 > 以 `@RestController("userOrderController")` 顯式命名避免衝突。其餘
@@ -199,9 +200,9 @@ sky-take-out (父工程 pom)
 |---|---|---|---|
 | `EmployeeMapper` | employee | 註解 + XML | insert, getByUsername, getById, pageQuery(XML動態SQL), update(XML動態SQL) |
 | `CategoryMapper` | category | 註解 + XML | insert, deleteById, pageQuery(XML), update(XML), list(XML) |
-| `DishMapper` | dish | 註解 + XML | insert(XML), getById, deleteById, deleteByIds(XML), countByCategoryId, pageQuery(XML), list(XML動態條件), update(XML全欄位動態), getBySetmealId |
+| `DishMapper` | dish | 註解 + XML | insert(XML), getById, deleteById, deleteByIds(XML), countByCategoryId, pageQuery(XML), list(XML動態條件), update(XML全欄位動態), getBySetmealId, countByMap(XML動態統計菜品數，供工作台菜品總覽) |
 | `DishFlavorMapper` | dish_flavor | 註解 + XML | insertBatch(XML), deleteByDishId, deleteByDishIds(XML批量), getByDishId |
-| `SetmealMapper` | setmeal | 註解 + XML | insert(XML), getById, deleteById, update(XML全欄位動態), pageQuery(XML), list(XML動態條件), countByCategoryId, getDishItemBySetmealId |
+| `SetmealMapper` | setmeal | 註解 + XML | insert(XML), getById, deleteById, update(XML全欄位動態), pageQuery(XML), list(XML動態條件), countByCategoryId, getDishItemBySetmealId, countByMap(XML動態統計套餐數，供工作台套餐總覽) |
 | `SetmealDishMapper` | setmeal_dish | 註解 + XML | insertBatch(XML), deleteBySetmealId, getBySetmealId, getDishIdsByDishIds(XML), getSetmealIdsByDishIds(XML) |
 | `ShoppingCartMapper` | shopping_cart | 註解 + XML | list(XML動態條件), updateNumberById(註解), insert(註解), deleteByUserId(註解), deleteById(註解) |
 | `AddressBookMapper` | address_book | 註解 | insert, list(動態條件), getById, update, updateIsDefaultByUserId, deleteById |
@@ -1412,6 +1413,66 @@ GET /admin/report/top10?begin=2022-05-01&end=2022-05-31
 > 第三次重演。共用 mapper 方法（`sumByMap` / `countByMap` 被多個報表共用）改動參數契約時，
 > **務必回頭掃一遍所有呼叫端的 map 鍵**。
 
+### 5.17 工作台總覽（Workspace 首頁四塊數據）
+
+管理端登入後的**工作台首頁**：不同於 5.13–5.16 的「日期區間報表」（給前端畫折線 / 柱狀圖），
+工作台是**當下快照**——四個獨立接口分別回傳「今日營業數據」「訂單管理總覽」「菜品總覽」
+「套餐總覽」，前端據此渲染首頁的數字卡片。四塊數據全部**複用既有 mapper 的
+`countByMap` / `sumByMap`**，沒有新增任何 SQL 骨架，只是換一組 map 條件去查。
+
+#### 接口一覽
+
+| 方法 | 路徑 | 功能 | 回傳 VO |
+|---|---|---|---|
+| `GET` | `/admin/workspace/businessData` | 今日營業數據 | `BusinessDataVO`（turnover / validOrderCount / orderCompletionRate / unitPrice / newUsers） |
+| `GET` | `/admin/workspace/overviewOrders` | 訂單管理總覽 | `OrderOverViewVO`（waiting / delivered / completed / cancelled / all） |
+| `GET` | `/admin/workspace/overviewDishes` | 菜品總覽 | `DishOverViewVO`（sold 起售 / discontinued 停售） |
+| `GET` | `/admin/workspace/overviewSetmeals` | 套餐總覽 | `SetmealOverViewVO`（sold 起售 / discontinued 停售） |
+
+> 時間邊界由 **Controller** 決定：`businessData` 取「今日 00:00:00 → 23:59:59.999999999」
+> (`LocalTime.MIN` / `LocalTime.MAX`)；`overviewOrders` 只給 `begin = 今日 00:00:00`。
+> Service 層不再自行拼日期，職責清晰。
+
+#### 四塊數據怎麼算
+
+```
+getBusinessData(begin, end)   ← 今日 [MIN, MAX]
+  map = {begin, end}
+  ① totalOrderCount = orderMapper.countByMap(map)              今日全部訂單
+  map.put(status, COMPLETED)
+  ② turnover        = orderMapper.sumByMap(map)  (null → 0.0)  今日已完成營業額
+  ③ validOrderCount = orderMapper.countByMap(map)              今日已完成訂單數
+  ④ orderCompletionRate = valid / total   (兩者皆非 0 才算，否則 0.0)
+  ⑤ unitPrice           = turnover / valid (同上防除零)
+  ⑥ newUsers = userMapper.countByMap(map)   ← 走 UserMapper.xml，只認 begin/end，忽略 status
+
+getOrderOverView()            ← begin = 今日 00:00:00，逐一換 status 查 countByMap
+  waiting=TO_BE_CONFIRMED(2) / delivered=CONFIRMED(3) / completed=COMPLETED(5)
+  cancelled=CANCELLED(6) / all=status 置 null（只剩 begin 條件）
+
+getDishOverView() / getSetmealOverView()   ← 無時間條件，只換 status
+  sold = countByMap({status: ENABLE(1)})     discontinued = countByMap({status: DISABLE(0)})
+```
+
+#### 除錯結論（本次新增：無邏輯 Bug）
+
+本節程式碼經編譯 + 靜態檢查 + 邏輯走查，**未發現功能性 Bug**，重點驗證了三處易錯點：
+
+1. **map 鍵與 XML 對齊**：`getBusinessData` / `getOrderOverView` 放入 map 的鍵是
+   `begin` / `end` / `status`，與 `OrderMapper.xml` 現行版（5.16 統一後的 `begin` / `end`）
+   `<if>` 完全對齊——**沒有重蹈 5.13/5.14/5.16 的「鍵名不匹配 → 條件靜默失效」覆轍**。
+2. **除零保護到位**：完成率與客單價都以 `totalOrderCount != 0 && validOrderCount != 0`
+   守門；且 `countByMap` 走 `count(id)` 永不回 `null`，不存在自動拆箱 NPE。
+3. **`sumByMap` 判空**：`turnover = turnover == null ? 0.0 : turnover`，涵蓋當日零成交
+   （`sum(amount)` 回 `null`）情形。
+
+> `DishMapper` / `SetmealMapper` 為此各補一條 `countByMap`（`<if status>` + `<if categoryId>`
+> 動態條件）；工作台只用到 `status` 分支，`categoryId` 分支為通用預留。
+
+> ⚠️ **附帶發現（與工作台無關的既存 Bug）**：`DishMapper.xml` 的 `pageQuery` 首行為
+> `select d*,c.name ...`，`d*` 為無效 SQL（應為 `d.*`），會使**管理端菜品分頁查詢**在執行時
+> 報語法錯。此問題早於本次工作台改動即存在，不在本次修改範圍內，**尚未修正**，另行標註待處理。
+
 ---
 
 ## 六、數據流轉模型 (DTO / Entity / VO)
@@ -1792,6 +1853,7 @@ DishServiceImpl.getByIdWithFlavor():
 | WebSocket 客戶催單 | User → Admin | `GET /user/order/reminder/{id}` 由用戶主動觸發，向管理端群發催單提醒（`type=2`, `orderId`, `content`=訂單號） | 程式碼完成（依賴用戶端攔截器補齊 `userId`；催單本身可實跑） |
 | 訂單定時處理 | — | `@Scheduled` 定時掃描：待付款超時自動取消（每分鐘）、派送中超時自動完成（每日凌晨 1 點） | Done |
 | 數據統計 | Admin | 營業額統計（日粒度，`GET /admin/report/turnoverStatistics`，僅計已完成訂單）、用戶統計（日粒度，`GET /admin/report/userStatistics`，每日新增/累計用戶）、訂單統計（日粒度，`GET /admin/report/orderStatistics`，每日訂單數/有效訂單數 + 區間完成率）、銷量 Top10（`GET /admin/report/top10`，區間內已完成訂單明細 sum(number) 取前 10） | Done |
+| 工作台 | Admin | 今日營業數據（`GET /admin/workspace/businessData`）、訂單管理總覽（`overviewOrders`）、菜品總覽（`overviewDishes`）、套餐總覽（`overviewSetmeals`）；複用 `countByMap`/`sumByMap`，見 5.17 | Done |
 | 橫切功能 | — | JWT 認證(Admin)、AOP 自動填充、全域異常處理、Swagger 雙分組文檔、Redis 配置 | Done |
 
 ### 待開發
@@ -1800,7 +1862,8 @@ DishServiceImpl.getByIdWithFlavor():
 |---|---|---|
 | 用戶端 JWT 攔截器 | `JwtTokenUserInterceptor` | 微信登入已完成；尚缺攔截器校驗 `/user/**` 的 user token 並把 `userId` 寫入 `BaseContext`。**購物車、歷史訂單、取消、再來一單各接口已實作但取不到 `userId`，必須先補此項才能跑通** |
 | 百度地圖 AK | `sky.baidu.ak` | 配送範圍校驗程式碼已完成，但 AK 留空佔位；未填時 `checkOutOfRange` 會中斷下單，需申請真實 AK |
-| 數據統計 | 營運數據匯出（Excel） | 營業額統計（見 5.13）、用戶統計（見 5.14）、訂單統計（見 5.15）、銷量 Top10（見 5.16）已完成；尚缺工作台總覽數據匯出報表 |
+| 數據統計 | 營運數據匯出（Excel） | 營業額統計（見 5.13）、用戶統計（見 5.14）、訂單統計（見 5.15）、銷量 Top10（見 5.16）、工作台總覽（見 5.17）均已完成；尚缺將營運數據匯出為 Excel 報表 |
+| 菜品分頁 Bug | `DishMapper.xml` `pageQuery` | 首行 `select d*,c.name` 之 `d*` 為無效 SQL（應為 `d.*`），管理端菜品分頁查詢執行時會報語法錯；早於工作台改動即存在，尚未修正（見 5.17 附帶發現） |
 
 ---
 
